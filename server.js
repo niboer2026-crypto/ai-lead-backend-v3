@@ -97,11 +97,6 @@ for (const [column, type] of [
 }
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_external_id ON leads(external_id) WHERE external_id IS NOT NULL'); } catch (e) {}
 
-// 清理旧模拟数据
-try {
-  db.prepare("DELETE FROM leads WHERE name LIKE '社媒潜在客户 (%' OR name LIKE '定向客户 (%'").run();
-} catch (e) {}
-
 const defaultWelcome = "👋 您好！我是您的专属美业助理，请问有什么我可以帮您的？";
 const defaultPrompt = "You are a senior beauty consultant & personal assistant for a high-end beauty brand in the Middle East (Dubai, Riyadh, Doha). Professional, warm, and attentive. Never call yourself AI Sales.";
 
@@ -186,7 +181,7 @@ app.get('/api/dashboard/stats', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 社媒账号管理（支持绑定多个 FB/IG/TikTok/WhatsApp 账号）
+// 社媒账号管理（支持 180+ 矩阵号批量录入与隔离）
 app.get('/api/social-accounts', (req, res) => {
   try { res.json(db.prepare('SELECT * FROM social_accounts ORDER BY id DESC').all()); }
   catch (err) { res.status(500).json({ error: err.message }); }
@@ -398,7 +393,7 @@ app.get('/api/ai/chat-logs', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 全功能直通 HTML 页面（免登无遮罩）
+// 全功能直通 HTML 页面（免登无遮罩，修正发送按钮绑定）
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="zh-CN">
@@ -508,11 +503,11 @@ app.get('/', (req, res) => {
 
     <!-- 👤 社媒配置 -->
     <div class="card" id="sec-social-acc">
-      <h3>👤 社媒平台账号隔离配置</h3>
+      <h3>👤 社媒平台账号隔离配置 (支持180+矩阵号批量管理)</h3>
       <form id="accountForm" class="form-grid">
-        <div class="form-group"><label>平台</label><select id="accPlatform"><option>Facebook</option><option>Instagram</option><option>TikTok</option><option>WhatsApp</option></select></div>
-        <div class="form-group"><label>备注标签</label><input id="accLabel" placeholder="Dubai Branch" required></div>
-        <div class="form-group"><label>Profile/Token ID</label><input id="accProfileId" placeholder="prof_01" required></div>
+        <div class="form-group"><label>平台</label><select id="accPlatform"><option>TikTok</option><option>Facebook</option><option>Instagram</option><option>WhatsApp</option></select></div>
+        <div class="form-group"><label>备注标签 (如: TikTok-Matrix-01)</label><input id="accLabel" placeholder="TikTok-01" required></div>
+        <div class="form-group"><label>Profile/Token ID</label><input id="accProfileId" placeholder="tk_dubai_001" required></div>
         <button type="submit">🔗 绑定账号</button>
       </form>
       <div class="table-responsive"><table><thead><tr><th>ID</th><th>平台</th><th>备注</th><th>Profile</th><th>操作</th></tr></thead><tbody id="accountTableList"></tbody></table></div>
@@ -520,11 +515,11 @@ app.get('/', (req, res) => {
 
     <!-- 🌐 搜客任务 -->
     <div class="card" id="sec-search-task">
-      <h3>🌐 全自动社媒定向搜客任务</h3>
+      <h3>🌐 全自动社媒定向搜客与评论区互动任务</h3>
       <form id="socialSearchForm" class="form-grid">
-        <div class="form-group"><label>账号</label><select id="ssAccount" required><option value="">选择账号</option></select></div>
+        <div class="form-group"><label>矩阵账号</label><select id="ssAccount" required><option value="">选择账号</option></select></div>
         <div class="form-group"><label>平台</label><input id="ssPlatform" readonly style="background:#eee"></div>
-        <div class="form-group"><label>关键词</label><input id="ssKeywords" placeholder="Salon" required></div>
+        <div class="form-group"><label>目标评论区关键词</label><input id="ssKeywords" placeholder="Dubai Salon / Hair style" required></div>
         <button type="submit">💾 创建任务</button>
       </form>
       <div class="table-responsive"><table><thead><tr><th>平台</th><th>账号</th><th>关键词</th><th>操作</th></tr></thead><tbody id="socialSearchList"></tbody></table></div>
@@ -614,17 +609,29 @@ app.get('/', (req, res) => {
     }
 
     async function sendAiMessage() {
-      const phone = document.getElementById("chatPhoneInput").value.trim();
-      const message = document.getElementById("chatMsgInput").value.trim();
+      const inputs = document.querySelectorAll("#sec-ai-chat input");
+      const phoneInput = inputs[0];
+      const msgInput = inputs[1];
       const container = document.getElementById("chatLogsContainer");
+
+      const phone = phoneInput ? phoneInput.value.trim() : "";
+      const message = msgInput ? msgInput.value.trim() : "";
       if (!message) return alert("请输入要测试发送的内容");
 
       container.innerHTML += '<div class="msg customer">[' + (phone || '访客') + '] ' + message + '</div>';
-      document.getElementById("chatMsgInput").value = "";
+      if (msgInput) msgInput.value = "";
+      container.scrollTop = container.scrollHeight;
+
+      const loadingDiv = document.createElement("div");
+      loadingDiv.className = "msg ai";
+      loadingDiv.id = "tempAiLoading";
+      loadingDiv.textContent = "🤖 AI 正在实时思考并调用大模型中……";
+      container.appendChild(loadingDiv);
       container.scrollTop = container.scrollHeight;
 
       try {
         const res = await api("/api/ai/chat-reply", { method: "POST", body: JSON.stringify({ customer_phone: phone, customer_message: message }) });
+        document.getElementById("tempAiLoading")?.remove();
         container.innerHTML += '<div class="msg ai">' + res.ai_reply + '</div>';
         container.scrollTop = container.scrollHeight;
         if (res.auto_appointment_created) {
@@ -632,6 +639,7 @@ app.get('/', (req, res) => {
           loadAppointments(); loadStats();
         }
       } catch(err) {
+        document.getElementById("tempAiLoading")?.remove();
         container.innerHTML += '<div class="msg customer" style="background:#fee2e2;color:#991b1b">❌ 发送失败：' + err.message + '</div>';
         container.scrollTop = container.scrollHeight;
       }
