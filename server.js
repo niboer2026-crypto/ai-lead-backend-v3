@@ -1,4 +1,4 @@
-require('dotenv').config();
+Require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
@@ -123,43 +123,58 @@ function loadStoredKey(){try{const r=db.prepare('SELECT encrypted_key,iv,auth_ta
 let apiKey=(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||loadStoredKey()||'').trim();
 let ai=apiKey?new GoogleGenAI({apiKey}):null;
 
-// 带有 15 秒超时保护与多模型自动回退的高速调用函数
-async function callGeminiSafe(promptText, systemPrompt) {
-  if (!apiKey || !ai) throw new Error("未配置有效的 Gemini API Key");
-  const models = ["gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
-  let lastError = null;
+// ========== 【重点修改这里：修复超时、模型、重试逻辑】 ==========
+const AI_TIMEOUT = 12000;
+const MAX_RETRY_PER_MODEL = 1;
+// 官方合法模型，删掉无效的 gemini-flash
+const MODEL_LIST = ["gemini-2.5-flash", "gemini-2.0-flash"];
 
-  for (const model of models) {
-    try {
-      // 15 秒超时控制器
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
-
-      const promise = ai.models.generateContent({
-        model: model,
-        contents: promptText,
-        config: {
-          systemInstruction: systemPrompt,
-          temperature: 0.7,
-        }
-      });
-
-      const response = await promise;
-      clearTimeout(timeoutId);
-
-      if (response && response.text) {
-        return response.text;
-      }
-    } catch (err) {
-      lastError = err;
-      console.warn(`[Safe Mode] Model ${model} failed:`, err.message);
-    }
-  }
-  throw lastError || new Error("AI 响应超时或所有模型调用失败");
+function promiseTimeout(promise, ms, errMsg = "AI 请求超时") {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(errMsg)), ms))
+  ]);
 }
 
+async function callGeminiSafe(promptText, systemPrompt) {
+  if (!apiKey || !ai) throw new Error("未配置有效的 Gemini API Key");
+  let lastError = null;
+
+  for (const model of MODEL_LIST) {
+    for (let r = 0; r <= MAX_RETRY_PER_MODEL; r++) {
+      try {
+        const result = await promiseTimeout(
+          ai.models.generateContent({
+            model: model,
+            contents: promptText,
+            config: {
+              systemInstruction: systemPrompt,
+              temperature: 0.7,
+            }
+          }),
+          AI_TIMEOUT
+        );
+        if (result && result.text) {
+          return result.text;
+        } else {
+          throw new Error("AI 返回空内容");
+        }
+      } catch (err) {
+        lastError = err;
+        console.warn(`[AI] model=${model}, retry=${r} fail:`, err.message);
+        // 配额、密钥错误不再重试
+        if (err.message.includes("API key") || err.message.includes("quota") || err.message.includes("403")) {
+          throw err;
+        }
+      }
+    }
+  }
+  throw lastError || new Error("所有AI模型调用失败");
+}
+// ==========================================================
+
 app.get('/api/ai/status', (req, res) => {
-  res.json({ok:true,model:"gemini-3.8-flash (Safe Mode)",configured:!!apiKey&&!!ai});
+  res.json({ok:true,model:"gemini-2.5-flash (优先)",configured:!!apiKey&&!!ai});
 });
 
 app.post('/api/ai/key',(req,res)=>{try{const key=String(req.body?.apiKey||'').trim();if(!key)return res.status(400).json({error:'请输入有效的 Key'});const e=encryptSecret(key);db.prepare(`INSERT INTO ai_secrets(id,encrypted_key,iv,auth_tag,updated_at) VALUES(1,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET encrypted_key=excluded.encrypted_key,iv=excluded.iv,auth_tag=excluded.auth_tag,updated_at=CURRENT_TIMESTAMP`).run(e.encrypted_key,e.iv,e.auth_tag);apiKey=key;ai=new GoogleGenAI({apiKey});res.json({ok:true,message:'API Key 保存成功'});}catch(err){res.status(500).json({error:err.message});}});
@@ -257,15 +272,19 @@ app.get('/api/leads', (req, res) => {
   res.json({ ok: true, leads: db.prepare("SELECT * FROM leads ORDER BY created_at DESC LIMIT 100").all() });
 });
 
-// 具备完善错误捕获和状态返回的聊天接口
+let isChatBusy = false;
 app.post('/api/ai/chat-reply', async (req, res) => {
-  const { customer_phone, customer_message, platform } = req.body || {};
-  const phone = String(customer_phone || "Web Visitor").trim();
-  const message = String(customer_message || "").trim();
-  if (!message) return res.status(400).json({ ok: false, error: "消息不能为空" });
-  if (!apiKey || !ai) return res.status(503).json({ ok: false, error: "未配置 Gemini API Key，请先在上方设置并保存 Key" });
+  if(isChatBusy){
+    return res.status(429).json({ok:false, error:"正在处理上一条消息，请稍后再发"});
+  }
+  isChatBusy = true;
+  try{
+    const { customer_phone, customer_message, platform } = req.body || {};
+    const phone = String(customer_phone || "Web Visitor").trim();
+    const message = String(customer_message || "").trim();
+    if (!message) return res.status(400).json({ ok: false, error: "消息不能为空" });
+    if (!apiKey || !ai) return res.status(503).json({ ok: false, error: "未配置 Gemini API Key，请先在上方设置并保存 Key" });
 
-  try {
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'customer', ?, ?)`).run(phone, platform || 'Website', message, new Date().toISOString());
     const cfg = db.prepare('SELECT system_prompt FROM ai_config WHERE id = 1').get();
 
@@ -274,8 +293,10 @@ app.post('/api/ai/chat-reply', async (req, res) => {
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'ai', ?, ?)`).run(phone, platform || 'Website', aiReply, new Date().toISOString());
 
     res.json({ ok: true, ai_reply: aiReply, detected_language: "自动识别", auto_appointment_created: false, appointment_number: null });
-  } catch (err) {
+  }catch(err){
     res.status(502).json({ ok: false, error: "Gemini 响应失败: " + err.message });
+  }finally{
+    isChatBusy = false;
   }
 });
 
@@ -352,7 +373,7 @@ app.get('/', (req, res) => {
 
     <!-- AI 助理对话测试 -->
     <div class="card">
-      <h3>🤖 AI 美业客服助理实时测试 (极速安全版)</h3>
+      <h3>🤖 AI 美业客服助理实时测试 (稳定版)</h3>
       <div class="chat-box" id="chatContainer">
         <div class="msg ai">👋 您好！我是 Beauty Corner 专属美业助理，请问有什么可以帮您的？</div>
       </div>
@@ -512,7 +533,7 @@ app.get('/', (req, res) => {
         tbody.innerHTML = '';
         if (!data.results.length) { tbody.innerHTML = '<tr><td colspan="6" style="text-align:center">未找到匹配商家</td></tr>'; return; }
         data.results.forEach(r => {
-          tbody.innerHTML += \`<tr><td>\${r.name}</td><td>\${r.category}</td><td>\${r.phone || '-'}</td><td><a href="\${r.website}" target="_blank">\${r.website ? '链接' : '-'}</a></td><td>\-</td><td><a href="\${r.maps_url}" target="_blank">Google Maps</a></td></tr>\`;
+          tbody.innerHTML += \`<tr><td>\${r.name}</td><td>\${r.category}</td><td>\${r.phone || '-'}</td><td><a href="\${r.website}" target="_blank">\${r.website ? '链接' : '-'}</a></td><td>\${r.address || '-'}</td><td><a href="\${r.maps_url}" target="_blank">Google Maps</a></td></tr>\`;
         });
         loadAll();
       } else {
