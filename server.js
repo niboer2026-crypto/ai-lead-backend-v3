@@ -6,7 +6,7 @@ const { GoogleGenAI } = require('@google/genai');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// 初始化本地 SQLite 数据库 (自动生成 data.db文件)
+// 初始化本地 SQLite 数据库
 const db = new Database('data.db');
 
 db.exec(`
@@ -67,7 +67,7 @@ db.exec(`
   );
 `);
 
-// 🧹 自动清理机制：每次服务启动时，自动清理超过 7 天的旧聊天日志，保持数据库轻量高效
+// 🧹 自动清理机制：每次服务启动时，自动清理超过 7 天的旧聊天日志
 try {
   db.exec(`
     DELETE FROM chat_logs 
@@ -78,7 +78,6 @@ try {
   console.error("🧹 自动清理旧日志失败:", e.message);
 }
 
-// 初始默认 AI 欢迎词与提示词（美业专属智能助理）
 const defaultWelcome = "👋 您好！我是您的专属美业助理，请问有什么我可以帮您的？";
 const defaultPrompt = "You are a senior beauty consultant & personal assistant for a high-end beauty brand in the Middle East (Dubai, Riyadh, Doha). Professional, warm, and attentive. Never call yourself AI Sales.";
 
@@ -99,18 +98,35 @@ if (!existingAdmin) {
 
 app.use(express.json());
 
-// 初始化 Gemini 客户端
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// API 路由：登录
+// 增强版登录 API：加入详细的后端错误捕获与提示
 app.post('/api/login', (req, res) => {
-  const { username, password } = req.body || {};
-  const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(String(username||"").trim(), String(password||"").trim());
-  if (!user) return res.status(401).json({ error: '用户名或密码错误 / Invalid credentials' });
-  res.json({ ok: true, username: user.username, role: user.role });
+  try {
+    const { username, password } = req.body || {};
+    const cleanUser = String(username || "").trim();
+    const cleanPass = String(password || "").trim();
+
+    console.log(`🔑 收到登录请求: 用户名 [${cleanUser}]`);
+
+    if (!cleanUser || !cleanPass) {
+      return res.status(400).json({ error: '用户名或密码不能为空 / Username or password cannot be empty' });
+    }
+
+    const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(cleanUser, cleanPass);
+    if (!user) {
+      console.warn(`⚠️ 登录失败: 用户名或密码错误 (${cleanUser})`);
+      return res.status(401).json({ error: '用户名或密码错误 / Invalid username or password' });
+    }
+
+    console.log(`✅ 登录成功: 用户 [${user.username}], 角色 [${user.role}]`);
+    res.json({ ok: true, username: user.username, role: user.role });
+  } catch (err) {
+    console.error("❌ 登录接口异常:", err.message);
+    res.status(500).json({ error: '服务器内部错误: ' + err.message });
+  }
 });
 
-// AI 配置读取与保存 API
 app.get('/api/ai/config', (req, res) => {
   try {
     const config = db.prepare('SELECT welcome_msg, system_prompt FROM ai_config WHERE id = 1').get();
@@ -233,7 +249,6 @@ app.post('/api/social-search/:id/run', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// 🤖 Gemini AI 智能聊天与结构化预约时间提取
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
   const phone = customer_phone || '+971 50 999 8888';
@@ -413,7 +428,7 @@ app.get('/', (req, res) => {
           <input type="password" id="loginPass" data-i18n-ph="ph_pass" placeholder="请输入密码" required>
         </div>
         <button type="submit" class="primary" style="padding: 12px; margin-top: 8px;" data-i18n="login_btn">登 录 系 统</button>
-        <div id="loginError" style="color:#f87171; font-size:12px; text-align:center;"></div>
+        <div id="loginError" style="color:#f87171; font-size:12px; text-align:center; margin-top:5px;"></div>
       </form>
     </div>
   </div>
@@ -733,7 +748,7 @@ app.get('/', (req, res) => {
       const username = document.getElementById("loginUser").value.trim();
       const password = document.getElementById("loginPass").value.trim();
       const errEl = document.getElementById("loginError");
-      errEl.textContent = "";
+      errEl.textContent = "⏳ 正在登录...";
       try {
         const res = await api("/api/login", { method: "POST", body: JSON.stringify({ username, password }) });
         localStorage.setItem("ai_lead_user", res.username);
@@ -742,7 +757,9 @@ app.get('/', (req, res) => {
         document.getElementById("mainApp").style.display = "block";
         document.getElementById("currentUserDisplay").textContent = "👤 " + res.username + " (" + (res.role === 'admin' ? 'Super Admin' : 'Staff') + ")";
         loadAllData();
-      } catch (err) { errEl.textContent = err.message; }
+      } catch (err) { 
+        errEl.textContent = "❌ 登录失败: " + err.message; 
+      }
     });
 
     function logout() {
