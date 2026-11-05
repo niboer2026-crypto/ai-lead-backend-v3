@@ -8,7 +8,7 @@ async function api(url, options = {}) {
   return data;
 }
 
-// 登录处理
+// 登录
 document.getElementById("loginForm")?.addEventListener("submit", async function(e) {
   e.preventDefault();
   const username = document.getElementById("loginUser").value;
@@ -21,10 +21,14 @@ document.getElementById("loginForm")?.addEventListener("submit", async function(
       method: "POST",
       body: JSON.stringify({ username, password })
     });
+    
     localStorage.setItem("ai_lead_user", res.username);
+    localStorage.setItem("ai_lead_role", res.role);
+
     document.getElementById("loginOverlay").style.display = "none";
     document.getElementById("mainApp").style.display = "block";
-    document.getElementById("currentUserDisplay").textContent = `👤 当前用户: ${res.username} (${res.role})`;
+    document.getElementById("currentUserDisplay").textContent = `👤 当前登录: ${res.username} (${res.role === 'admin' ? '超级管理员' : '员工'})`;
+    
     loadAllData();
   } catch (err) {
     errEl.textContent = err.message;
@@ -33,27 +37,83 @@ document.getElementById("loginForm")?.addEventListener("submit", async function(
 
 function logout() {
   localStorage.removeItem("ai_lead_user");
+  localStorage.removeItem("ai_lead_role");
   location.reload();
 }
 
 window.addEventListener("DOMContentLoaded", () => {
   const savedUser = localStorage.getItem("ai_lead_user");
+  const savedRole = localStorage.getItem("ai_lead_role");
   if (savedUser) {
     document.getElementById("loginOverlay").style.display = "none";
     document.getElementById("mainApp").style.display = "block";
-    document.getElementById("currentUserDisplay").textContent = `👤 当前用户: ${savedUser}`;
+    document.getElementById("currentUserDisplay").textContent = `👤 当前登录: ${savedUser} (${savedRole === 'admin' ? '超级管理员' : '员工'})`;
     loadAllData();
   }
 });
 
 async function loadAllData() {
+  const role = localStorage.getItem("ai_lead_role");
+  if (role === 'admin') {
+    document.getElementById("userManagementSection").style.display = "block";
+    await loadUsersList();
+  } else {
+    document.getElementById("userManagementSection").style.display = "none";
+  }
+
   await loadStats();
   await loadAccounts();
   await loadAppointments();
   await loadSearchTasks();
 }
 
-// 加载统计漏斗数据
+// 0. 超级管理员开通/删除子账号
+async function loadUsersList() {
+  const tbody = document.getElementById("usersTableList");
+  if (!tbody) return;
+  try {
+    const users = await api("/api/admin/users");
+    tbody.innerHTML = "";
+    users.forEach(u => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${u.id}</td>
+        <td><b>${u.username}</b></td>
+        <td><span style="color: ${u.role === 'admin' ? '#38bdf8' : '#a855f7'}; font-weight:bold;">${u.role === 'admin' ? '👑 管理员' : '👤 员工'}</span></td>
+        <td>${u.created_at ? u.created_at.replace('T', ' ').slice(0, 16) : 'N/A'}</td>
+        <td>
+          ${u.role !== 'admin' ? `<button class="danger" style="padding: 4px 10px; font-size:12px;" onclick="deleteUser(${u.id})">注销账号</button>` : '<span style="color:#64748b;">主账号防护</span>'}
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+  } catch (e) { console.error(e); }
+}
+
+document.getElementById("createUserForm")?.addEventListener("submit", async function(e) {
+  e.preventDefault();
+  const data = {
+    username: document.getElementById("newUsername").value,
+    password: document.getElementById("newPassword").value,
+    role: document.getElementById("newRole").value
+  };
+  try {
+    await api("/api/admin/users", { method: "POST", body: JSON.stringify(data) });
+    alert("新子账号开通成功！");
+    this.reset();
+    await loadUsersList();
+  } catch (err) { alert(err.message); }
+});
+
+async function deleteUser(id) {
+  if (!confirm("确定注销该账号吗？注销后该员工将无法再登录系统")) return;
+  try {
+    await api(`/api/admin/users/${id}`, { method: "DELETE" });
+    await loadUsersList();
+  } catch (err) { alert(err.message); }
+}
+
+// 统计看板
 async function loadStats() {
   try {
     const s = await api("/api/dashboard/stats");
@@ -64,7 +124,7 @@ async function loadStats() {
   } catch (e) { console.error(e); }
 }
 
-// 1. 社媒账号绑定与管理
+// 1. 社媒账号绑定
 async function loadAccounts() {
   const tbody = document.getElementById("accountTableList");
   const sel = document.getElementById("ssAccount");
@@ -96,7 +156,6 @@ async function loadAccounts() {
         <td><code>${a.profile_id}</code></td>
         <td>${a.created_at ? a.created_at.replace('T', ' ').slice(0, 16) : 'N/A'}</td>
         <td style="display: flex; gap: 8px;">
-          <button class="primary" style="padding: 6px 12px; font-size:12px;" onclick="testAccount(${a.id})">验证在线</button>
           <button class="danger" style="padding: 6px 12px; font-size:12px;" onclick="deleteAccount(${a.id})">解除绑定</button>
         </td>
       `;
@@ -121,15 +180,11 @@ document.getElementById("accountForm")?.addEventListener("submit", async functio
 });
 
 async function deleteAccount(id) {
-  if (!confirm("确定解绑并删除此社媒账号吗？")) return;
+  if (!confirm("确定解绑此社媒账号吗？")) return;
   try {
     await api(`/api/social-accounts/${id}`, { method: "DELETE" });
     await loadAccounts();
   } catch (err) { alert(err.message); }
-}
-
-async function testAccount(id) {
-  alert(`账号 ID #${id} 独立浏览器环境指纹与 Cookie 状态正常，随时可执行获客！`);
 }
 
 document.getElementById("ssAccount")?.addEventListener("change", function() {
@@ -139,7 +194,7 @@ document.getElementById("ssAccount")?.addEventListener("change", function() {
   }
 });
 
-// 2. 社交搜索与自动获客任务
+// 2. 自动获客任务
 async function loadSearchTasks() {
   const tbody = document.getElementById("socialSearchList");
   if (!tbody) return;
@@ -161,7 +216,7 @@ async function loadSearchTasks() {
         <td>${t.gender}</td>
         <td><span style="color: ${t.enabled ? '#22c55e' : '#f87171'}; font-weight: bold;">${t.enabled ? '● 运行中' : '○ 已停用'}</span></td>
         <td style="display: flex; gap: 6px;">
-          <button class="primary" style="padding: 6px 12px; font-size:12px;" onclick="runTask(${t.id})">手动执行</button>
+          <button class="primary" style="padding: 6px 12px; font-size:12px;" onclick="runTask(${t.id})">执行</button>
           <button class="secondary" style="padding: 6px 12px; font-size:12px;" onclick="toggleTask(${t.id}, ${t.enabled})">${t.enabled ? '停用' : '启用'}</button>
           <button class="danger" style="padding: 6px 12px; font-size:12px;" onclick="deleteTask(${t.id})">删除</button>
         </td>
@@ -183,7 +238,7 @@ document.getElementById("socialSearchForm")?.addEventListener("submit", async fu
   };
   try {
     await api("/api/social-search", { method: "POST", body: JSON.stringify(data) });
-    alert("自动搜客任务创建成功！");
+    alert("获客任务创建成功！");
     this.reset();
     await loadSearchTasks();
   } catch (err) { alert(err.message); }
@@ -192,12 +247,12 @@ document.getElementById("socialSearchForm")?.addEventListener("submit", async fu
 async function runTask(id) {
   try {
     const res = await api(`/api/social-search/${id}/run`, { method: "POST" });
-    alert(`已通过独立环境成功唤起目标平台：\n平台: ${res.platform}\n链接: ${res.url}`);
+    alert(`已自动唤起搜索目标：\n${res.url}`);
   } catch (err) { alert(err.message); }
 }
 
 async function triggerBatchScrape() {
-  alert("⚡ 已触发全网一键自动获客指令：正在后台通过独立浏览器实例抓取中东地区目标潜客，新线索将自动同步入库！");
+  alert("⚡ 已触发全网一键自动获客指令：已开始抓取目标潜客！");
   loadStats();
 }
 
@@ -216,7 +271,7 @@ async function deleteTask(id) {
   } catch (err) { alert(err.message); }
 }
 
-// 3. 预约管理
+// 3. 预约排班
 async function loadAppointments() {
   const tbody = document.getElementById("appointmentList");
   if (!tbody) return;
@@ -264,7 +319,7 @@ document.getElementById("appointmentForm")?.addEventListener("submit", async fun
 });
 
 async function deleteAppt(no) {
-  if (!confirm("确定取消并删除该预约吗？")) return;
+  if (!confirm("确定取消该预约吗？")) return;
   try {
     await api(`/api/appointments/${no}`, { method: "DELETE" });
     await loadAppointments();
