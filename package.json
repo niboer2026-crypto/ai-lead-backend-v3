@@ -1,7 +1,6 @@
 {
   "name": "ai-lead-master",
   "version": "1.0.0",
-  "description": "AI Lead Master CRM Backend",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
