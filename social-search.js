@@ -36,7 +36,7 @@ async function loadSocialAccounts() {
   }
 }
 
-// 选择账号时自动匹配隐藏/只读的平台输入框
+// 选择账号时自动匹配平台
 const ssAccountEl = document.getElementById("ssAccount");
 if (ssAccountEl) {
   ssAccountEl.addEventListener("change", function () {
