@@ -84,7 +84,6 @@ db.exec(`
   );
 `);
 
-// 兼容字段升级
 for (const [column, type] of [
   ['external_id', 'TEXT'], ['category', 'TEXT'], ['address', 'TEXT'],
   ['website', 'TEXT'], ['email', 'TEXT'], ['latitude', 'REAL'],
@@ -103,7 +102,6 @@ if (!existingConfig) {
 
 app.use(express.json());
 
-// 认证与安全
 const AUTH_SECRET = process.env.APP_ENCRYPTION_KEY || process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const COOKIE_NAME = 'alm_session';
 function signToken(payload) { const body=Buffer.from(JSON.stringify(payload)).toString('base64url'); const sig=crypto.createHmac('sha256',AUTH_SECRET).update(body).digest('base64url'); return body+'.'+sig; }
@@ -119,14 +117,32 @@ app.post('/api/auth/logout',(req,res)=>{res.setHeader('Set-Cookie',`${COOKIE_NAM
 
 app.use('/api',(req,res,next)=>{if(['/auth/status','/auth/setup','/auth/login','/auth/logout'].includes(req.path))return next();if(!getSession(req))return res.status(401).json({error:'请先登录',code:'AUTH_REQUIRED'});next();});
 
-// Gemini 初始化 (已更新为官方推荐的 gemini-3.8-flash 模型)
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+// 使用最稳定的 gemini-1.5-flash 模型，规避高负载 503 错误
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-flash";
 const ENC_KEY = crypto.createHash('sha256').update(AUTH_SECRET).digest();
 function encryptSecret(value){const iv=crypto.randomBytes(12),c=crypto.createCipheriv('aes-256-gcm',ENC_KEY,iv),data=Buffer.concat([c.update(value,'utf8'),c.final()]);return{encrypted_key:data.toString('base64'),iv:iv.toString('base64'),auth_tag:c.getAuthTag().toString('base64')};}
 function decryptSecret(row){const d=crypto.createDecipheriv('aes-256-gcm',ENC_KEY,Buffer.from(row.iv,'base64'));d.setAuthTag(Buffer.from(row.auth_tag,'base64'));return Buffer.concat([d.update(Buffer.from(row.encrypted_key,'base64')),d.final()]).toString('utf8');}
 function loadStoredKey(){try{const r=db.prepare('SELECT encrypted_key,iv,auth_tag FROM ai_secrets WHERE id=1').get();return r?decryptSecret(r):'';}catch{return '';}}
 let apiKey=(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||loadStoredKey()||'').trim();
 let ai=apiKey?new GoogleGenAI({apiKey}):null;
+
+// 带有自动重试机制的 Gemini 请求封装（解决 503 高负载临时报错）
+async function callGeminiWithRetry(payload, retries = 3, delay = 2000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await ai.models.generateContent(payload);
+    } catch (err) {
+      const isOverloaded = /503|unavailable|high demand|overloaded/i.test(err.message || '');
+      if (isOverloaded && attempt < retries) {
+        console.warn(`[Gemini 503 Overloaded] 第 ${attempt} 次请求遇到高负载，正在等待 ${delay}ms 后自动重试...`);
+        await new Promise(r => setTimeout(r, delay));
+        delay *= 2; // 指数退避
+      } else {
+        throw err;
+      }
+    }
+  }
+}
 
 app.get('/api/ai/status', (req, res) => {
   res.json({ok:true,model:GEMINI_MODEL,configured:!!apiKey&&!!ai});
@@ -137,7 +153,7 @@ app.post('/api/ai/key',(req,res)=>{try{const key=String(req.body?.apiKey||'').tr
 app.post('/api/ai/key-test', async (req, res) => {
   try {
     if (!apiKey || !ai) return res.status(503).json({ ok: false, error: '未配置 Gemini API Key' });
-    const result = await ai.models.generateContent({ model: GEMINI_MODEL, contents: 'Reply OK' });
+    const result = await callGeminiWithRetry({ model: GEMINI_MODEL, contents: 'Reply OK' });
     res.json({ ok: true, message: '连接成功', preview: String(result.text || '').slice(0, 50) });
   } catch (err) { res.status(502).json({ ok: false, error: err.message }); }
 });
@@ -228,7 +244,7 @@ app.get('/api/leads', (req, res) => {
   res.json({ ok: true, leads: db.prepare("SELECT * FROM leads ORDER BY created_at DESC LIMIT 100").all() });
 });
 
-// AI 智能客服接口
+// AI 智能客服接口（带自动重试防 503）
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
   const phone = String(customer_phone || "Web Visitor").trim();
@@ -240,7 +256,7 @@ app.post('/api/ai/chat-reply', async (req, res) => {
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'customer', ?, ?)`).run(phone, platform || 'Website', message, new Date().toISOString());
     const cfg = db.prepare('SELECT system_prompt FROM ai_config WHERE id = 1').get();
 
-    const response = await ai.models.generateContent({
+    const response = await callGeminiWithRetry({
       model: GEMINI_MODEL,
       contents: `Customer message: ${message}`,
       config: {
@@ -273,7 +289,7 @@ app.post('/api/ai/chat-reply', async (req, res) => {
 
     res.json({ ok: true, ai_reply: aiReply, detected_language: parsed.detected_language, auto_appointment_created: !!apptNumber, appointment_number: apptNumber });
   } catch (err) {
-    res.status(502).json({ ok: false, error: err.message });
+    res.status(502).json({ ok: false, error: "Gemini 接口繁忙或调用失败: " + err.message });
   }
 });
 
@@ -281,7 +297,7 @@ app.get('/api/ai/chat-logs', (req, res) => {
   res.json(db.prepare('SELECT * FROM chat_logs ORDER BY id DESC LIMIT 50').all().reverse());
 });
 
-// 前端 UI 页面
+// 前端完整 UI 面板
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="zh-CN">
