@@ -86,22 +86,20 @@ if (!existingConfig) {
   db.prepare('INSERT INTO ai_config (id, welcome_msg, system_prompt) VALUES (1, ?, ?)').run(defaultWelcome, defaultPrompt);
 }
 
-// 🔐 账号初始化：仅在完全没有超管账号时初始化一次，后续绝不强行覆盖
+// 🔐 安全初始化：仅在表里完全没有任何用户时初始化一次超管，决不强行覆盖后续修改
 const superAdminUser = 'dubai';
 const superAdminPass = 'lcaizxy13';
-const existingAdmin = db.prepare('SELECT * FROM users WHERE username = ?').get(superAdminUser);
-if (!existingAdmin) {
+const adminCount = db.prepare('SELECT COUNT(*) as cnt FROM users').get().cnt;
+if (adminCount === 0) {
   db.prepare('INSERT INTO users (username, password, role) VALUES (?, ?, ?)').run(superAdminUser, superAdminPass, 'admin');
-  console.log("🔒 [安全提示] 已完成超管账号首次初始化: dubai");
-} else {
-  console.log("🔒 [安全提示] 超管账号已存在，保留当前密码配置。");
+  console.log("🔒 [安全提示] 已完成系统首次初始化超管账号。");
 }
 
 app.use(express.json());
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// 登录 API
+// 安全登录 API
 app.post('/api/login', (req, res) => {
   try {
     const { username, password } = req.body || {};
@@ -114,7 +112,7 @@ app.post('/api/login', (req, res) => {
 
     const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(cleanUser, cleanPass);
     if (!user) {
-      return res.status(401).json({ error: '用户名或密码错误，请检查输入 (默认: dubai / lcaizxy13)' });
+      return res.status(401).json({ error: '认证失败：用户名或密码错误' });
     }
 
     res.json({ ok: true, username: user.username, role: user.role });
@@ -433,21 +431,21 @@ app.get('/', (req, res) => {
   </style>
 </head>
 <body>
-  <!-- 登录遮罩层 -->
+  <!-- 安全登录遮罩层（无默认填充） -->
   <div id="loginOverlay">
     <div class="login-box">
       <h3 style="text-align:center; color:#38bdf8; margin-bottom:20px; font-size: 20px;" data-i18n="login_title">🔐 AI Lead Master 登录</h3>
       <form id="loginForm" style="display:flex; flex-direction:column; gap:12px;">
         <div class="form-group">
           <label data-i18n="username_label">用户名：</label>
-          <input type="text" id="loginUser" data-i18n-ph="ph_user" placeholder="请输入用户名" value="dubai" required>
+          <input type="text" id="loginUser" data-i18n-ph="ph_user" placeholder="请输入用户名" required autocomplete="off">
         </div>
         <div class="form-group">
           <label data-i18n="password_label">密码：</label>
-          <input type="password" id="loginPass" data-i18n-ph="ph_pass" placeholder="请输入密码" value="lcaizxy13" required>
+          <input type="password" id="loginPass" data-i18n-ph="ph_pass" placeholder="请输入密码" required autocomplete="current-password">
         </div>
         <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: #94a3b8; margin: 4px 0;">
-          <input type="checkbox" id="rememberMe" checked style="width: auto; cursor: pointer;">
+          <input type="checkbox" id="rememberMe" style="width: auto; cursor: pointer;">
           <label for="rememberMe" style="cursor: pointer; color: #cbd5e1;" data-i18n="remember_me">记住密码 (Remember Me)</label>
         </div>
         <button type="submit" class="primary" style="padding: 12px; margin-top: 4px;" data-i18n="login_btn">登 录 系 统</button>
@@ -618,7 +616,7 @@ app.get('/', (req, res) => {
         password_label: "密码：",
         ph_user: "请输入用户名",
         ph_pass: "请输入密码",
-        remember_me: "记住密码 (Remember Me)",
+        remember_me: "记住用户名",
         login_btn: "登 录 系 统",
         logout: "退出",
         nav_dashboard: "📊 仪表盘",
@@ -693,7 +691,7 @@ app.get('/', (req, res) => {
         password_label: "Password:",
         ph_user: "Enter username",
         ph_pass: "Enter password",
-        remember_me: "Remember Me",
+        remember_me: "Remember Username",
         login_btn: "LOGIN SYSTEM",
         logout: "Logout",
         nav_dashboard: "📊 Dashboard",
@@ -802,10 +800,16 @@ app.get('/', (req, res) => {
       return data;
     }
 
-    // 🚀 初始化与登录状态恢复逻辑
+    // 🚀 初始化与记住用户名支持（不再默认填密码）
     window.addEventListener("DOMContentLoaded", () => {
       applyLanguage();
       
+      const rememberedUser = localStorage.getItem("crm_saved_user");
+      if (rememberedUser) {
+        document.getElementById("loginUser").value = rememberedUser;
+        document.getElementById("rememberMe").checked = true;
+      }
+
       const savedUser = localStorage.getItem("ai_lead_user");
       const savedRole = localStorage.getItem("ai_lead_role");
       
@@ -1112,7 +1116,7 @@ app.get('/', (req, res) => {
         this.reset();
         await loadAppointments();
         await loadStats();
-      } catch (err) { alert(err.message); }
+      } catch (err) { alert(err.name); }
     });
 
     async function deleteAppt(no) {
