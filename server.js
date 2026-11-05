@@ -120,48 +120,62 @@ const ENC_KEY = crypto.createHash('sha256').update(AUTH_SECRET).digest();
 function encryptSecret(value){const iv=crypto.randomBytes(12),c=crypto.createCipheriv('aes-256-gcm',ENC_KEY,iv),data=Buffer.concat([c.update(value,'utf8'),c.final()]);return{encrypted_key:data.toString('base64'),iv:iv.toString('base64'),auth_tag:c.getAuthTag().toString('base64')};}
 function decryptSecret(row){const d=crypto.createDecipheriv('aes-256-gcm',ENC_KEY,Buffer.from(row.iv,'base64'));d.setAuthTag(Buffer.from(row.auth_tag,'base64'));return Buffer.concat([d.update(Buffer.from(row.encrypted_key,'base64')),d.final()]).toString('utf8');}
 function loadStoredKey(){try{const r=db.prepare('SELECT encrypted_key,iv,auth_tag FROM ai_secrets WHERE id=1').get();return r?decryptSecret(r):'';}catch{return '';}}
-let apiKey=(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||loadStoredKey()||'').trim();
-let ai=apiKey?new GoogleGenAI({apiKey}):null;
 
-// 🛡️ 鲁棒性极强的多模型自动切换与降级策略
-const MODEL_CANDIDATES = ["gemini-2.5-flash", "gemini-2.0-flash"];
+// 🚀 获取 API Key 池（支持英文逗号分隔填入多个 Key）
+function getApiKeyPool() {
+  const envKeys = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').split(',').map(k => k.trim()).filter(Boolean);
+  const stored = loadStoredKey();
+  const storedKeys = stored.split(',').map(k => k.trim()).filter(Boolean);
+  return Array.from(new Set([...envKeys, ...storedKeys]));
+}
 
-async function callGeminiRobust(promptText, systemPrompt) {
-  if (!apiKey || !ai) throw new Error("未配置有效的 Gemini API Key");
-  
+// 🛡️ 强制对齐官方最新要求的 gemini-3.8-flash 模型，支持多 Key 轮询
+async function callGeminiMultiKeyPool(promptText, systemPrompt) {
+  const keys = getApiKeyPool();
+  if (keys.length === 0) throw new Error("未配置任何有效的 Gemini API Key");
+
+  // 严格使用官方最新指定的 gemini-3.8-flash
+  const models = ["gemini-3.8-flash"];
   let lastError = null;
-  for (const model of MODEL_CANDIDATES) {
-    try {
-      const response = await ai.models.generateContent({
-        model: model,
-        contents: promptText,
-        config: {
-          systemInstruction: systemPrompt,
-          temperature: 0.7,
+
+  for (const apiKey of keys) {
+    const aiClient = new GoogleGenAI({ apiKey });
+    for (const model of models) {
+      try {
+        const response = await aiClient.models.generateContent({
+          model: model,
+          contents: promptText,
+          config: {
+            systemInstruction: systemPrompt,
+            temperature: 0.7,
+          }
+        });
+        if (response && response.text) {
+          return response.text;
         }
-      });
-      if (response && response.text) {
-        return response.text;
+      } catch (err) {
+        lastError = err;
+        console.warn(`[Pool Warning] Key ending in ...${apiKey.slice(-4)} failed: ${err.message}`);
       }
-    } catch (err) {
-      lastError = err;
-      console.warn(`[RobustAI] Model ${model} failed:`, err.message);
     }
   }
-  throw lastError || new Error("所有备用 AI 模型调用均失败");
+
+  throw lastError || new Error("所有 API Key 池中的账号调用均失败");
 }
 
 app.get('/api/ai/status', (req, res) => {
-  res.json({ok:true,model:"gemini-2.5-flash (Robust)",configured:!!apiKey&&!!ai});
+  const keysCount = getApiKeyPool().length;
+  res.json({ok:true,model:"gemini-3.8-flash (Multi-Key Pool)",configured:keysCount>0});
 });
 
-app.post('/api/ai/key',(req,res)=>{try{const key=String(req.body?.apiKey||'').trim();if(!key)return res.status(400).json({error:'请输入有效的 Key'});const e=encryptSecret(key);db.prepare(`INSERT INTO ai_secrets(id,encrypted_key,iv,auth_tag,updated_at) VALUES(1,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET encrypted_key=excluded.encrypted_key,iv=excluded.iv,auth_tag=excluded.auth_tag,updated_at=CURRENT_TIMESTAMP`).run(e.encrypted_key,e.iv,e.auth_tag);apiKey=key;ai=new GoogleGenAI({apiKey});res.json({ok:true,message:'API Key 保存成功'});}catch(err){res.status(500).json({error:err.message});}});
+app.post('/api/ai/key',(req,res)=>{try{const key=String(req.body?.apiKey||'').trim();if(!key)return res.status(400).json({error:'请输入有效的 Key'});const e=encryptSecret(key);db.prepare(`INSERT INTO ai_secrets(id,encrypted_key,iv,auth_tag,updated_at) VALUES(1,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET encrypted_key=excluded.encrypted_key,iv=excluded.iv,auth_tag=excluded.auth_tag,updated_at=CURRENT_TIMESTAMP`).run(e.encrypted_key,e.iv,e.auth_tag);res.json({ok:true,message:'API Key 保存成功'});}catch(err){res.status(500).json({error:err.message});}});
 
 app.post('/api/ai/key-test', async (req, res) => {
   try {
-    if (!apiKey || !ai) return res.status(503).json({ ok: false, error: '未配置 Gemini API Key' });
-    const text = await callGeminiRobust('Reply OK', 'You are a helpful assistant.');
-    res.json({ ok: true, message: '连接成功', preview: String(text).slice(0, 50) });
+    const keys = getApiKeyPool();
+    if (keys.length === 0) return res.status(503).json({ ok: false, error: '未配置任何 Gemini API Key' });
+    const text = await callGeminiMultiKeyPool('Reply OK', 'You are a helpful assistant.');
+    res.json({ ok: true, message: `连接成功 (当前 Key 池共 ${keys.length} 个可用)`, preview: String(text).slice(0, 50) });
   } catch (err) { res.status(502).json({ ok: false, error: err.message }); }
 });
 
@@ -261,12 +275,14 @@ app.post('/api/ai/chat-reply', async (req, res) => {
     const phone = String(customer_phone || "Web Visitor").trim();
     const message = String(customer_message || "").trim();
     if (!message) return res.status(400).json({ ok: false, error: "消息不能为空" });
-    if (!apiKey || !ai) return res.status(503).json({ ok: false, error: "未配置 Gemini API Key" });
+
+    const keys = getApiKeyPool();
+    if (keys.length === 0) return res.status(503).json({ ok: false, error: "未配置任何 Gemini API Key" });
 
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'customer', ?, ?)`).run(phone, platform || 'Website', message, new Date().toISOString());
     const cfg = db.prepare('SELECT system_prompt FROM ai_config WHERE id = 1').get();
 
-    const aiReply = await callGeminiRobust(message, cfg?.system_prompt || defaultPrompt);
+    const aiReply = await callGeminiMultiKeyPool(message, cfg?.system_prompt || defaultPrompt);
 
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'ai', ?, ?)`).run(phone, platform || 'Website', aiReply, new Date().toISOString());
 
@@ -340,10 +356,10 @@ app.get('/', (req, res) => {
 
     <!-- AI 配置与密钥设置 -->
     <div class="card">
-      <h3>🔐 Gemini API Key 设置</h3>
+      <h3>🔐 Gemini API Key 设置 (支持多个 Key 用逗号分隔)</h3>
       <div style="display:flex;gap:10px">
-        <input id="apiKeyInput" type="password" placeholder="粘贴 Google AI Studio Gemini API Key">
-        <button onclick="saveApiKey()" style="white-space:nowrap">保存 Key</button>
+        <input id="apiKeyInput" type="password" placeholder="粘贴多个 Key，用英文逗号隔开 (如: key1,key2)">
+        <button onclick="saveApiKey()" style="white-space:nowrap">保存 Key 池</button>
         <button class="success" onclick="testKey()" style="white-space:nowrap">测试连接</button>
       </div>
       <p id="keyStatus" style="font-size:13px;color:#64748b;margin-top:8px">状态：检查中...</p>
@@ -351,7 +367,7 @@ app.get('/', (req, res) => {
 
     <!-- AI 助理对话测试 -->
     <div class="card">
-      <h3>🤖 AI 美业客服助理实时测试 (稳定版)</h3>
+      <h3>🤖 AI 美业客服助理实时测试 (gemini-3.8-flash 高可用版)</h3>
       <div class="chat-box" id="chatContainer">
         <div class="msg ai">👋 您好！我是 Beauty Corner 专属美业助理，请问有什么可以帮您的？</div>
       </div>
@@ -419,7 +435,7 @@ app.get('/', (req, res) => {
       document.getElementById('statAppt').textContent = appts.length;
 
       const aiStatus = await fetch('/api/ai/status').then(r => r.json());
-      document.getElementById('keyStatus').textContent = aiStatus.configured ? '状态：Gemini AI 已就绪 (Online)' : '状态：未配置 API Key，请在上方输入并保存';
+      document.getElementById('keyStatus').textContent = aiStatus.configured ? `状态：Gemini 3.8-flash Key池就绪 (${aiStatus.model})` : '状态：未配置 API Key';
 
       loadChatLogs();
       loadLeads();
@@ -440,7 +456,7 @@ app.get('/', (req, res) => {
       try {
         const res = await fetch('/api/ai/key-test', { method: 'POST' });
         const data = await res.json();
-        alert(data.ok ? '连接成功！' : '连接失败: ' + data.error);
+        alert(data.ok ? data.message : '连接失败: ' + data.error);
       } catch (err) {
         alert('请求出错: ' + err.message);
       } finally {
