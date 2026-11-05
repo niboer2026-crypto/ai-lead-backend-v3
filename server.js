@@ -123,9 +123,9 @@ function loadStoredKey(){try{const r=db.prepare('SELECT encrypted_key,iv,auth_ta
 let apiKey=(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||loadStoredKey()||'').trim();
 let ai=apiKey?new GoogleGenAI({apiKey}):null;
 
-// 高速稳定的多模型轮询和重试
+// 优先采用最新的官方 3.8-flash 模型，如果遇到偶发网络波动自动回退到 2.0-flash
 async function callGeminiFast(promptText, systemPrompt) {
-  const models = ["gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
+  const models = ["gemini-3.8-flash", "gemini-2.0-flash"];
   let lastError = null;
 
   for (const model of models) {
@@ -150,7 +150,7 @@ async function callGeminiFast(promptText, systemPrompt) {
 }
 
 app.get('/api/ai/status', (req, res) => {
-  res.json({ok:true,model:"gemini-flash (Fast Mode)",configured:!!apiKey&&!!ai});
+  res.json({ok:true,model:"gemini-3.8-flash (Fast Mode)",configured:!!apiKey&&!!ai});
 });
 
 app.post('/api/ai/key',(req,res)=>{try{const key=String(req.body?.apiKey||'').trim();if(!key)return res.status(400).json({error:'请输入有效的 Key'});const e=encryptSecret(key);db.prepare(`INSERT INTO ai_secrets(id,encrypted_key,iv,auth_tag,updated_at) VALUES(1,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET encrypted_key=excluded.encrypted_key,iv=excluded.iv,auth_tag=excluded.auth_tag,updated_at=CURRENT_TIMESTAMP`).run(e.encrypted_key,e.iv,e.auth_tag);apiKey=key;ai=new GoogleGenAI({apiKey});res.json({ok:true,message:'API Key 保存成功'});}catch(err){res.status(500).json({error:err.message});}});
@@ -248,7 +248,7 @@ app.get('/api/leads', (req, res) => {
   res.json({ ok: true, leads: db.prepare("SELECT * FROM leads ORDER BY created_at DESC LIMIT 100").all() });
 });
 
-// 高速文本聊天接口（秒回，不卡顿）
+// 极速文本回复聊天接口
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
   const phone = String(customer_phone || "Web Visitor").trim();
