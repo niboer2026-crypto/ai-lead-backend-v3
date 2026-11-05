@@ -6,7 +6,7 @@ const { GoogleGenAI } = require('@google/genai');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// 初始化本地 SQLite 数据库
+// 1. 初始化本地 SQLite 数据库
 const db = new Database('data.db');
 
 db.exec(`
@@ -67,16 +67,10 @@ db.exec(`
   );
 `);
 
-// 🧹 自动清理：启动时自动清理 7 天前的聊天记录
+// 🧹 自动清理旧日志
 try {
-  db.exec(`
-    DELETE FROM chat_logs 
-    WHERE datetime(created_at) < datetime('now', '-7 days');
-  `);
-  console.log("🧹 自动清理：已成功清理超过 7 天的旧聊天日志。");
-} catch (e) {
-  console.error("🧹 自动清理旧日志失败:", e.message);
-}
+  db.exec(`DELETE FROM chat_logs WHERE datetime(created_at) < datetime('now', '-7 days');`);
+} catch (e) {}
 
 const defaultWelcome = "👋 您好！我是您的专属美业助理，请问有什么我可以帮您的？";
 const defaultPrompt = "You are a senior beauty consultant & personal assistant for a high-end beauty brand in the Middle East (Dubai, Riyadh, Doha). Professional, warm, and attentive. Never call yourself AI Sales.";
@@ -86,37 +80,51 @@ if (!existingConfig) {
   db.prepare('INSERT INTO ai_config (id, welcome_msg, system_prompt) VALUES (1, ?, ?)').run(defaultWelcome, defaultPrompt);
 }
 
-// 🔐 安全初始化：仅在表里完全没有任何用户时初始化一次超管，决不强行覆盖后续修改
+// 🔐 账号初始化（带去除隐藏空格处理）
 const superAdminUser = 'dubai';
 const superAdminPass = 'lcaizxy13';
-const adminCount = db.prepare('SELECT COUNT(*) as cnt FROM users').get().cnt;
-if (adminCount === 0) {
+
+// 强制修正数据库中的超管密码，确保绝无多余字符
+const existingAdmin = db.prepare('SELECT * FROM users WHERE username = ?').get(superAdminUser);
+if (!existingAdmin) {
   db.prepare('INSERT INTO users (username, password, role) VALUES (?, ?, ?)').run(superAdminUser, superAdminPass, 'admin');
-  console.log("🔒 [安全提示] 已完成系统首次初始化超管账号。");
+  console.log("🔒 [安全初始化] 账号创建成功 -> 用户名: dubai | 密码: lcaizxy13");
+} else {
+  // 强制覆盖重置，确保没有遗留格式字符
+  db.prepare('UPDATE users SET password = ? WHERE username = ?').run(superAdminPass, superAdminUser);
+  console.log("🔒 [安全重置] 已强制重置超管密码为纯净无空格密码。");
 }
 
 app.use(express.json());
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// 安全登录 API
+// 🔑 排错强化版 登录 API
 app.post('/api/login', (req, res) => {
   try {
-    const { username, password } = req.body || {};
-    const cleanUser = String(username || "").trim();
-    const cleanPass = String(password || "").trim();
+    let { username, password } = req.body || {};
+    
+    // 清除不可见字符 (零宽空格 \u200B) 和前后普通空格
+    const cleanUser = String(username || "").replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+    const cleanPass = String(password || "").replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+
+    console.log(`🔍 [登录诊断] 尝试登录 -> 用户名: "${cleanUser}" (长度:${cleanUser.length}) | 密码长度: ${cleanPass.length}`);
 
     if (!cleanUser || !cleanPass) {
       return res.status(400).json({ error: '用户名或密码不能为空' });
     }
 
     const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(cleanUser, cleanPass);
+    
     if (!user) {
-      return res.status(401).json({ error: '认证失败：用户名或密码错误' });
+      console.error(`❌ [登录失败] 用户名或密码匹配失败。`);
+      return res.status(401).json({ error: '认证失败：用户名或密码错误，请检查是否有多余空格' });
     }
 
+    console.log(`✅ [登录成功] 欢迎用户: ${user.username} (${user.role})`);
     res.json({ ok: true, username: user.username, role: user.role });
   } catch (err) {
+    console.error("💥 [登录服务器异常]:", err.message);
     res.status(500).json({ error: '服务器内部错误: ' + err.message });
   }
 });
@@ -313,7 +321,6 @@ app.post('/api/ai/chat-reply', async (req, res) => {
     }
 
     const aiReply = aiResult.reply;
-
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'ai', ?, ?)`).run(phone, platform || 'WhatsApp', aiReply, new Date().toISOString());
 
     let autoAppointmentCreated = false;
@@ -431,7 +438,7 @@ app.get('/', (req, res) => {
   </style>
 </head>
 <body>
-  <!-- 安全登录遮罩层（无默认填充） -->
+  <!-- 安全登录遮罩层 -->
   <div id="loginOverlay">
     <div class="login-box">
       <h3 style="text-align:center; color:#38bdf8; margin-bottom:20px; font-size: 20px;" data-i18n="login_title">🔐 AI Lead Master 登录</h3>
@@ -446,7 +453,7 @@ app.get('/', (req, res) => {
         </div>
         <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: #94a3b8; margin: 4px 0;">
           <input type="checkbox" id="rememberMe" style="width: auto; cursor: pointer;">
-          <label for="rememberMe" style="cursor: pointer; color: #cbd5e1;" data-i18n="remember_me">记住密码 (Remember Me)</label>
+          <label for="rememberMe" style="cursor: pointer; color: #cbd5e1;" data-i18n="remember_me">记住用户名</label>
         </div>
         <button type="submit" class="primary" style="padding: 12px; margin-top: 4px;" data-i18n="login_btn">登 录 系 统</button>
         <div id="loginError" style="color:#f87171; font-size:12px; text-align:center; min-height: 18px;"></div>
@@ -476,7 +483,7 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
-    <!-- 📊 仪表盘卡片与快捷跳转按钮 -->
+    <!-- 📊 仪表盘 -->
     <div class="stats-grid">
       <div class="stat-card blue">
         <div>
@@ -570,7 +577,7 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
-    <!-- 🌐 搜客任务与真实自动获客 -->
+    <!-- 🌐 搜客任务 -->
     <div class="card" id="sec-search-task">
       <h3 data-i18n="task_title">🌐 2. 全自动社媒定向搜客任务</h3>
       <form id="socialSearchForm" class="form-grid">
@@ -794,13 +801,12 @@ app.get('/', (req, res) => {
       try {
         data = JSON.parse(text);
       } catch (e) {
-        throw new Error("服务器返回非 JSON 数据: " + text.slice(0, 100));
+        throw new Error("服务器响应格式异常");
       }
-      if (!res.ok) throw new Error(data.error || "请求失败 (HTTP " + res.status + ")");
+      if (!res.ok) throw new Error(data.error || ("HTTP Error " + res.status));
       return data;
     }
 
-    // 🚀 初始化与记住用户名支持（不再默认填密码）
     window.addEventListener("DOMContentLoaded", () => {
       applyLanguage();
       
@@ -821,16 +827,21 @@ app.get('/', (req, res) => {
       }
     });
 
-    // 🔑 显式登录事件监听
+    // 🔑 强化的前端登录表单监听
     document.getElementById("loginForm")?.addEventListener("submit", async function(e) {
       e.preventDefault();
-      const username = document.getElementById("loginUser").value.trim();
-      const password = document.getElementById("loginPass").value.trim();
+      
+      // 去除隐藏字符和两端空格
+      const rawUser = document.getElementById("loginUser").value;
+      const rawPass = document.getElementById("loginPass").value;
+      
+      const username = rawUser.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+      const password = rawPass.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
       const remember = document.getElementById("rememberMe").checked;
       const errEl = document.getElementById("loginError");
       
       errEl.style.color = "#38bdf8";
-      errEl.textContent = "⏳ 正在连接服务器验证...";
+      errEl.textContent = "⏳ 正在验证认证信息...";
 
       try {
         const res = await api("/api/login", { 
@@ -901,7 +912,7 @@ app.get('/', (req, res) => {
             system_prompt: document.getElementById("cfgSystemPrompt").value.trim()
           })
         });
-        alert(currentLang === 'en' ? "Assistant Config Saved!" : "助理打招呼语及人设配置保存成功！");
+        alert(currentLang === 'en' ? "Assistant Config Saved!" : "助理配置保存成功！");
         await loadAiConfig();
       } catch (err) { alert(err.message); }
     });
@@ -934,7 +945,7 @@ app.get('/', (req, res) => {
         container.scrollTop = container.scrollHeight;
 
         if (res.auto_appointment_created) {
-          const msgText = currentLang === 'en' ? "🔥 Assistant captured booking! Created [" + res.appointment_number + "] for " + (res.extracted_date || 'Today') + " " + (res.extracted_time || '15:00') : "🔥 助理成功为您生成预约单！单号 [" + res.appointment_number + "]（时间: " + (res.extracted_date || '今日') + " " + (res.extracted_time || '15:00') + "）";
+          const msgText = currentLang === 'en' ? "🔥 Assistant captured booking! Created [" + res.appointment_number + "]" : "🔥 助理成功为您生成预约单！单号 [" + res.appointment_number + "]";
           alert(msgText);
           await loadAppointments();
           await loadStats();
@@ -979,7 +990,7 @@ app.get('/', (req, res) => {
       e.preventDefault();
       try {
         await api("/api/admin/users", { method: "POST", body: JSON.stringify({ username: document.getElementById("newUsername").value.trim(), password: document.getElementById("newPassword").value.trim(), role: document.getElementById("newRole").value }) });
-        alert(currentLang === 'en' ? "Account created successfully!" : "开通成功！");
+        alert(currentLang === 'en' ? "Account created!" : "开通成功！");
         this.reset();
         await loadUsersList();
       } catch (err) { alert(err.message); }
@@ -1116,7 +1127,7 @@ app.get('/', (req, res) => {
         this.reset();
         await loadAppointments();
         await loadStats();
-      } catch (err) { alert(err.name); }
+      } catch (err) { alert(err.message); }
     });
 
     async function deleteAppt(no) {
