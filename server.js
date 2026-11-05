@@ -6,7 +6,6 @@ const { GoogleGenAI } = require('@google/genai');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// 初始化本地 SQLite 数据库 (自动生成 data.db文件)
 const db = new Database('data.db');
 
 db.exec(`
@@ -67,7 +66,6 @@ db.exec(`
   );
 `);
 
-// 初始默认 AI 欢迎词与提示词（美业专属智能助理）
 const defaultWelcome = "👋 您好！我是您的专属美业助理，请问有什么我可以帮您的？";
 const defaultPrompt = "You are a senior beauty consultant & personal assistant for a high-end beauty brand in the Middle East (Dubai, Riyadh, Doha). Professional, warm, and attentive. Never call yourself AI Sales.";
 
@@ -76,7 +74,6 @@ if (!existingConfig) {
   db.prepare('INSERT INTO ai_config (id, welcome_msg, system_prompt) VALUES (1, ?, ?)').run(defaultWelcome, defaultPrompt);
 }
 
-// 强制同步超管账号：dubai / lcaizxy13
 const superAdminUser = 'dubai';
 const superAdminPass = 'lcaizxy13';
 const existingAdmin = db.prepare('SELECT * FROM users WHERE username = ?').get(superAdminUser);
@@ -88,10 +85,8 @@ if (!existingAdmin) {
 
 app.use(express.json());
 
-// 初始化 Gemini 客户端
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// API 路由：登录
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body || {};
   const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(String(username||"").trim(), String(password||"").trim());
@@ -99,7 +94,6 @@ app.post('/api/login', (req, res) => {
   res.json({ ok: true, username: user.username, role: user.role });
 });
 
-// AI 配置读取与保存 API
 app.get('/api/ai/config', (req, res) => {
   try {
     const config = db.prepare('SELECT welcome_msg, system_prompt FROM ai_config WHERE id = 1').get();
@@ -222,7 +216,6 @@ app.post('/api/social-search/:id/run', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// 🤖 Gemini AI 智能聊天与结构化预约时间提取（美业智能助理人设 - 最新适配 gemini-3.8-flash 模型）
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
   const phone = customer_phone || '+971 50 999 8888';
@@ -248,7 +241,7 @@ app.post('/api/ai/chat-reply', async (req, res) => {
       }
       Rules:
       1. If the customer wants to book or asks about booking/pricing, set "has_booking_intent" to true.
-      2. Carefully parse any date/time clues (e.g. tomorrow, next Monday, 下午3点) relative to 2026-11-05.
+      2. Carefully parse any date/time clues relative to 2026-11-05.
     `;
 
     const response = await ai.models.generateContent({
@@ -323,7 +316,6 @@ app.get('/api/ai/chat-logs', (req, res) => {
   }
 });
 
-// 前端网页界面（全响应式 + 手机适配 + 横向可滑动导航栏 + 助理打招呼编辑 + 双语）
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="zh-CN">
@@ -336,39 +328,14 @@ app.get('/', (req, res) => {
     html { scroll-behavior: smooth; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; margin: 0; padding: 12px; color: #f8fafc; }
     .container { max-width: 1400px; margin: 0 auto; background: #1e293b; padding: 18px; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid #334155; }
-    
     .header-bar { border-bottom: 2px solid #334155; padding-bottom: 12px; margin-bottom: 16px; }
     .header-top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
     h2 { color: #38bdf8; margin: 0; font-size: 20px; }
-
-    /* 横向单行平滑滑动导航栏 */
-    .nav-buttons-scroll {
-      display: flex;
-      gap: 10px;
-      overflow-x: auto;
-      white-space: nowrap;
-      padding: 4px 2px 10px 2px;
-      -webkit-overflow-scrolling: touch;
-      scrollbar-width: none;
-    }
+    .nav-buttons-scroll { display: flex; gap: 10px; overflow-x: auto; white-space: nowrap; padding: 4px 2px 10px 2px; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
     .nav-buttons-scroll::-webkit-scrollbar { display: none; }
-    
-    .nav-btn {
-      flex: 0 0 auto;
-      background: #0f172a;
-      color: #38bdf8;
-      border: 1px solid #334155;
-      padding: 8px 16px;
-      border-radius: 20px;
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
+    .nav-btn { flex: 0 0 auto; background: #0f172a; color: #38bdf8; border: 1px solid #334155; padding: 8px 16px; border-radius: 20px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
     .nav-btn:hover, .nav-btn:active { background: #38bdf8; color: #0f172a; }
-
     .lang-btn { background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff; border: none; padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: bold; cursor: pointer; }
-
     .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 25px; }
     .stat-card { padding: 15px; border-radius: 12px; color: #fff; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
     .stat-card.blue { background: linear-gradient(135deg, #3b82f6, #1d4ed8); }
@@ -377,15 +344,12 @@ app.get('/', (req, res) => {
     .stat-card.emerald { background: linear-gradient(135deg, #10b981, #047857); }
     .stat-card h4 { margin: 0 0 8px 0; font-size: 12px; text-transform: uppercase; }
     .stat-card .num { font-size: 24px; font-weight: bold; }
-
     .card { background: #0f172a; border: 1px solid #334155; border-radius: 12px; padding: 16px; margin-bottom: 20px; }
     h3 { color: #f1f5f9; margin-top: 0; border-bottom: 2px solid #334155; padding-bottom: 8px; font-size: 16px; }
-
     .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; align-items: end; }
     .form-group { display: flex; flex-direction: column; gap: 6px; }
     .form-group label { font-weight: 600; font-size: 12px; color: #94a3b8; }
     .form-group input, .form-group select, .form-group textarea { padding: 10px 12px; background: #1e293b; border: 1px solid #475569; color: #f8fafc; border-radius: 8px; font-size: 14px; outline: none; width: 100%; }
-
     button { padding: 10px 14px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 14px; transition: transform 0.1s; width: 100%; }
     button:active { transform: scale(0.97); }
     button.primary { background: linear-gradient(135deg, #0ea5e9, #0284c7); color: #fff; }
@@ -394,26 +358,21 @@ app.get('/', (req, res) => {
     button.danger { background: linear-gradient(135deg, #ef4444, #b91c1c); color: #fff; }
     button.whatsapp { background: linear-gradient(135deg, #25d366, #128c7e); color: #fff; }
     button.purple-btn { background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: #fff; }
-
     .table-responsive { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; min-width: 600px; }
     th, td { border: 1px solid #334155; padding: 10px; text-align: left; }
     th { background-color: #1e293b; font-weight: 600; color: #38bdf8; text-transform: uppercase; font-size: 11px; }
     tr:nth-child(even) { background-color: rgba(30, 41, 59, 0.4); }
-
     #loginOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15,23,42,0.95); display: flex; justify-content: center; align-items: center; z-index: 9999; padding: 15px; }
     .login-box { background: #1e293b; padding: 25px; border-radius: 16px; width: 100%; max-width: 360px; border: 1px solid #334155; box-shadow: 0 15px 35px rgba(0,0,0,0.6); }
-
     .badge { padding: 3px 8px; border-radius: 20px; font-size: 11px; font-weight: bold; display: inline-block; }
     .badge.fb { background: #1d4ed8; color: #bfdbfe; }
     .badge.ig { background: #be185d; color: #fce7f3; }
     .badge.tk { background: #374151; color: #f3f4f6; border: 1px solid #6b7280; }
-
     .chat-box { height: 280px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
     .msg { padding: 8px 12px; border-radius: 8px; max-width: 85%; font-size: 13px; line-height: 1.4; word-break: break-word; }
     .msg.customer { background: #334155; color: #f8fafc; align-self: flex-start; }
     .msg.ai { background: #0284c7; color: #fff; align-self: flex-end; }
-
     .chat-input-group { display: flex; flex-direction: column; gap: 8px; }
     @media(min-width: 640px) {
       .chat-input-group { flex-direction: row; }
@@ -451,7 +410,6 @@ app.get('/', (req, res) => {
           <button class="danger" onclick="logout()" style="width:auto; padding: 4px 10px; font-size:12px;" data-i18n="logout">退出</button>
         </div>
       </div>
-      <!-- 手机端优化：横向单行滑块导航栏 -->
       <div class="nav-buttons-scroll">
         <button class="nav-btn" onclick="scrollToSec('sec-dashboard')" data-i18n="nav_dashboard">📊 仪表盘</button>
         <button class="nav-btn" onclick="scrollToSec('sec-ai-chat')" data-i18n="nav_ai">🤖 美业助理</button>
@@ -482,7 +440,6 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
-    <!-- 助理对话工作台 -->
     <div class="card" id="sec-ai-chat" style="border: 1px solid #0ea5e9;">
       <h3 style="color: #38bdf8;" data-i18n="ai_title">🤖 智能美业助理与预约工作台</h3>
       <p style="font-size: 12px; color: #94a3b8; margin-bottom: 12px;" data-i18n="ai_desc">客户输入预约意向，助理将温柔解答并自动精准识别时间生成预约单！</p>
@@ -498,7 +455,6 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
-    <!-- 自定义编辑 AI 助理打招呼用词与 Prompt -->
     <div class="card" id="sec-ai-edit" style="border: 1px solid #a855f7;">
       <h3 style="color: #c084fc;" data-i18n="edit_ai_title">✍️ 自定义助理打招呼语与人设设置</h3>
       <form id="aiConfigForm" style="display:flex; flex-direction:column; gap:12px;">
@@ -766,7 +722,7 @@ app.get('/', (req, res) => {
         localStorage.setItem("ai_lead_role", res.role);
         document.getElementById("loginOverlay").style.display = "none";
         document.getElementById("mainApp").style.display = "block";
-        document.getElementById("currentUserDisplay").textContent = `👤 ${res.username} (${res.role === 'admin' ? 'Super Admin' : 'Staff'})`;
+        document.getElementById("currentUserDisplay").textContent = "👤 " + res.username + " (" + (res.role === 'admin' ? 'Super Admin' : 'Staff') + ")";
         loadAllData();
       } catch (err) { errEl.textContent = err.message; }
     });
@@ -784,7 +740,7 @@ app.get('/', (req, res) => {
       if (savedUser) {
         document.getElementById("loginOverlay").style.display = "none";
         document.getElementById("mainApp").style.display = "block";
-        document.getElementById("currentUserDisplay").textContent = `👤 ${savedUser} (${savedRole === 'admin' ? 'Super Admin' : 'Staff'})`;
+        document.getElementById("currentUserDisplay").textContent = "👤 " + savedUser + " (" + (savedRole === 'admin' ? 'Super Admin' : 'Staff') + ")";
         loadAllData();
       }
     });
@@ -840,7 +796,7 @@ app.get('/', (req, res) => {
 
       const userDiv = document.createElement("div");
       userDiv.className = "msg customer";
-      userDiv.textContent = `[${phone}] ${message}`;
+      userDiv.textContent = "[" + phone + "] " + message;
       container.appendChild(userDiv);
       msgInput.value = "";
       container.scrollTop = container.scrollHeight;
@@ -858,7 +814,7 @@ app.get('/', (req, res) => {
         container.scrollTop = container.scrollHeight;
 
         if (res.auto_appointment_created) {
-          const msgText = currentLang === 'en' ? `🔥 Assistant captured booking! Created [${res.appointment_number}] for ${res.extracted_date || 'Today'} ${res.extracted_time || '15:00'}` : `🔥 助理成功为您生成预约单！单号 [${res.appointment_number}]（时间: ${res.extracted_date || '今日'} ${res.extracted_time || '15:00'}）`;
+          const msgText = currentLang === 'en' ? "🔥 Assistant captured booking! Created [" + res.appointment_number + "] for " + (res.extracted_date || 'Today') + " " + (res.extracted_time || '15:00') : "🔥 助理成功为您生成预约单！单号 [" + res.appointment_number + "]（时间: " + (res.extracted_date || '今日') + " " + (res.extracted_time || '15:00') + "）";
           alert(msgText);
           await loadAppointments();
           await loadStats();
@@ -877,7 +833,7 @@ app.get('/', (req, res) => {
           logs.forEach(l => {
             const div = document.createElement("div");
             div.className = l.sender === 'ai' ? 'msg ai' : 'msg customer';
-            div.textContent = `[${l.customer_phone}] ${l.message}`;
+            div.textContent = "[" + l.customer_phone + "] " + l.message;
             container.appendChild(div);
           });
           container.scrollTop = container.scrollHeight;
@@ -893,7 +849,7 @@ app.get('/', (req, res) => {
         tbody.innerHTML = "";
         users.forEach(u => {
           const tr = document.createElement("tr");
-          tr.innerHTML = `<td>${u.id}</td><td><b>${u.username}</b></td><td><span style="color: ${u.role === 'admin' ? '#38bdf8' : '#a855f7'}; font-weight:bold;">${u.role === 'admin' ? '👑 Admin' : '👤 Staff'}</span></td><td>${u.created_at ? u.created_at.replace('T', ' ').slice(0, 16) : 'N/A'}</td><td>${u.role !== 'admin' ? `<button class="danger" style="padding: 4px 8px; font-size:12px;" onclick="deleteUser(${u.id})">Delete</button>` : '<span style="color:#64748b;">Main</span>'}</td>`;
+          tr.innerHTML = "<td>" + u.id + "</td><td><b>" + u.username + "</b></td><td><span style=\"color: " + (u.role === 'admin' ? '#38bdf8' : '#a855f7') + "; font-weight:bold;\">" + (u.role === 'admin' ? '👑 Admin' : '👤 Staff') + "</span></td><td>" + (u.created_at ? u.created_at.replace('T', ' ').slice(0, 16) : 'N/A') + "</td><td>" + (u.role !== 'admin' ? "<button class=\"danger\" style=\"padding: 4px 8px; font-size:12px;\" onclick=\"deleteUser(" + u.id + ")\">Delete</button>" : "<span style=\"color:#64748b;\">Main</span>") + "</td>";
           tbody.appendChild(tr);
         });
       } catch (e) { console.error(e); }
@@ -911,7 +867,7 @@ app.get('/', (req, res) => {
 
     async function deleteUser(id) {
       if (!confirm("Confirm to delete?")) return;
-      try { await api(`/api/admin/users/${id}`, { method: "DELETE" }); await loadUsersList(); } catch (err) { alert(err.message); }
+      try { await api("/api/admin/users/" + id, { method: "DELETE" }); await loadUsersList(); } catch (err) { alert(err.message); }
     }
 
     async function loadStats() {
@@ -930,12 +886,12 @@ app.get('/', (req, res) => {
       if (!tbody || !sel) return;
       try {
         const accs = await api("/api/social-accounts");
-        sel.innerHTML = `<option value="">${currentLang === 'en' ? 'Select Account' : '选择授权账号'}</option>`;
+        sel.innerHTML = "<option value=\"\">" + (currentLang === 'en' ? 'Select Account' : '选择授权账号') + "</option>";
         accs.forEach(a => {
           const opt = document.createElement("option");
           opt.value = a.id;
           opt.dataset.platform = a.platform;
-          opt.textContent = `${a.platform} - ${a.label}`;
+          opt.textContent = a.platform + " - " + a.label;
           sel.appendChild(opt);
         });
         tbody.innerHTML = "";
@@ -943,7 +899,7 @@ app.get('/', (req, res) => {
         accs.forEach(a => {
           const badgeClass = a.platform === 'Facebook' ? 'fb' : (a.platform === 'Instagram' ? 'ig' : 'tk');
           const tr = document.createElement("tr");
-          tr.innerHTML = `<td>${a.id}</td><td><span class="badge ${badgeClass}">${a.platform}</span></td><td><b>${a.label}</b></td><td><code>${a.profile_id}</code></td><td>${a.created_at ? a.created_at.replace('T', ' ').slice(0, 16) : 'N/A'}</td><td><button class="danger" style="padding: 4px 8px; font-size:12px;" onclick="deleteAccount(${a.id})">Unbind</button></td>`;
+          tr.innerHTML = "<td>" + a.id + "</td><td><span class=\"badge " + badgeClass + "\">" + a.platform + "</span></td><td><b>" + a.label + "</b></td><td><code>" + a.profile_id + "</code></td><td>" + (a.created_at ? a.created_at.replace('T', ' ').slice(0, 16) : 'N/A') + "</td><td><button class=\"danger\" style=\"padding: 4px 8px; font-size:12px;\" onclick=\"deleteAccount(" + a.id + ")\">Unbind</button></td>";
           tbody.appendChild(tr);
         });
       } catch (e) { console.error(e); }
@@ -961,7 +917,7 @@ app.get('/', (req, res) => {
 
     async function deleteAccount(id) {
       if (!confirm("Confirm to unbind?")) return;
-      try { await api(`/api/social-accounts/${id}`, { method: "DELETE" }); await loadAccounts(); } catch (err) { alert(err.message); }
+      try { await api("/api/social-accounts/" + id, { method: "DELETE" }); await loadAccounts(); } catch (err) { alert(err.message); }
     }
 
     document.getElementById("ssAccount")?.addEventListener("change", function() {
@@ -978,7 +934,7 @@ app.get('/', (req, res) => {
         if (!tasks.length) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#64748b;">No Tasks</td></tr>'; return; }
         tasks.forEach(t => {
           const tr = document.createElement("tr");
-          tr.innerHTML = `<td><b>${t.platform}</b></td><td>ID: ${t.account_id}</td><td>${t.country || 'Global'}</td><td>${t.city || 'Any'}</td><td><code>${t.keywords}</code></td><td>${t.gender}</td><td><span style="color: ${t.enabled ? '#22c55e' : '#f87171'}; font-weight: bold;">${t.enabled ? '● Active' : '○ Disabled'}</span></td><td style="display: flex; gap: 4px;"><button class="primary" style="padding: 4px 8px; font-size:12px;" onclick="runTask(${t.id})">Run</button><button class="secondary" style="padding: 4px 8px; font-size:12px;" onclick="toggleTask(${t.id}, ${t.enabled})">${t.enabled ? 'Disable' : 'Enable'}</button><button class="danger" style="padding: 4px 8px; font-size:12px;" onclick="deleteTask(${t.id})">Delete</button></td>`;
+          tr.innerHTML = "<td><b>" + t.platform + "</b></td><td>ID: " + t.account_id + "</td><td>" + (t.country || 'Global') + "</td><td>" + (t.city || 'Any') + "</td><td><code>" + t.keywords + "</code></td><td>" + t.gender + "</td><td><span style=\"color: " + (t.enabled ? '#22c55e' : '#f87171') + "; font-weight: bold;\">" + (t.enabled ? '● Active' : '○ Disabled') + "</span></td><td style=\"display: flex; gap: 4px;\"><button class=\"primary\" style=\"padding: 4px 8px; font-size:12px;\" onclick=\"runTask(" + t.id + ")\">Run</button><button class=\"secondary\" style=\"padding: 4px 8px; font-size:12px;\" onclick=\"toggleTask(" + t.id + ", " + t.enabled + ")\">" + (t.enabled ? 'Disable' : 'Enable') + "</button><button class=\"danger\" style=\"padding: 4px 8px; font-size:12px;\" onclick=\"deleteTask(" + t.id + ")\">Delete</button></td>";
           tbody.appendChild(tr);
         });
       } catch (e) { console.error(e); }
@@ -995,16 +951,16 @@ app.get('/', (req, res) => {
     });
 
     async function runTask(id) {
-      try { const res = await api(`/api/social-search/${id}/run`, { method: "POST" }); alert(`Search Target Launched:\n${res.url}`); } catch (err) { alert(err.message); }
+      try { const res = await api("/api/social-search/" + id + "/run", { method: "POST" }); alert("Search Target Launched:\n" + res.url); } catch (err) { alert(err.message); }
     }
 
     async function triggerBatchScrape() { alert("⚡ Auto Lead Scrape Command Triggered!"); loadStats(); }
     async function toggleTask(id, current) {
-      try { await api(`/api/social-search/${id}`, { method: "PATCH", body: JSON.stringify({ enabled: !current }) }); await loadSearchTasks(); } catch (err) { alert(err.message); }
+      try { await api("/api/social-search/" + id, { method: "PATCH", body: JSON.stringify({ enabled: !current }) }); await loadSearchTasks(); } catch (err) { alert(err.message); }
     }
     async function deleteTask(id) {
       if (!confirm("Confirm to delete?")) return;
-      try { await api(`/api/social-search/${id}`, { method: "DELETE" }); await loadSearchTasks(); } catch (err) { alert(err.message); }
+      try { await api("/api/social-search/" + id, { method: "DELETE" }); await loadSearchTasks(); } catch (err) { alert(err.message); }
     }
 
     async function loadAppointments() {
@@ -1017,7 +973,7 @@ app.get('/', (req, res) => {
         appts.forEach(ap => {
           const tr = document.createElement("tr");
           const cleanPhone = ap.phone.replace(/[^0-9]/g, "");
-          tr.innerHTML = `<td><b style="color:#38bdf8;">${ap.appointment_number}</b></td><td>${ap.staff_id}</td><td>${ap.phone}</td><td>${ap.date} ${ap.time}</td><td><span style="color: #22c55e; font-weight: bold;">${ap.status}</span></td><td style="display: flex; gap: 4px;"><a href="https://wa.me/${cleanPhone}" target="_blank"><button class="whatsapp" style="padding: 4px 8px; font-size:12px;">💬 WA</button></a><button class="danger" style="padding: 4px 8px; font-size:12px;" onclick="deleteAppt('${ap.appointment_number}')">Cancel</button></td>`;
+          tr.innerHTML = "<td><b style=\"color:#38bdf8;\">" + ap.appointment_number + "</b></td><td>" + ap.staff_id + "</td><td>" + ap.phone + "</td><td>" + ap.date + " " + ap.time + "</td><td><span style=\"color: #22c55e; font-weight: bold;\">" + ap.status + "</span></td><td style=\"display: flex; gap: 4px;\"><a href=\"https://wa.me/" + cleanPhone + "\" target=\"_blank\"><button class=\"whatsapp\" style=\"padding: 4px 8px; font-size:12px;\">💬 WA</button></a><button class=\"danger\" style=\"padding: 4px 8px; font-size:12px;\" onclick=\"deleteAppt('" + ap.appointment_number + "')\">Cancel</button></td>";
           tbody.appendChild(tr);
         });
       } catch (e) { console.error(e); }
@@ -1036,7 +992,7 @@ app.get('/', (req, res) => {
 
     async function deleteAppt(no) {
       if (!confirm("Confirm to cancel?")) return;
-      try { await api(`/api/appointments/${no}`, { method: "DELETE" }); await loadAppointments(); await loadStats(); } catch (err) { alert(err.message); }
+      try { await api("/api/appointments/" + no, { method: "DELETE" }); await loadAppointments(); await loadStats(); } catch (err) { alert(err.message); }
     }
   </script>
 </body>
