@@ -222,7 +222,7 @@ app.post('/api/social-search/:id/run', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// 🤖 Gemini AI 智能聊天与结构化预约时间提取（美业智能助理人设 - 已更新为 gemini-3.8-flash 模型）
+// 🤖 Gemini AI 智能聊天与结构化预约时间提取（美业智能助理人设 - 最新适配 gemini-3.8-flash 模型）
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
   const phone = customer_phone || '+971 50 999 8888';
@@ -266,7 +266,7 @@ app.post('/api/ai/chat-reply', async (req, res) => {
       aiResult = JSON.parse(response.text.trim());
     } catch (e) {
       aiResult = {
-        reply: response.text ? response.text.trim() : "感谢您的咨询，请问有什么可以帮您的？",
+        reply: response.text ? response.text.trim() : "感谢您的咨询，请问有什么我可以帮您的？",
         has_booking_intent: false,
         appointment_date: null,
         appointment_time: "15:00"
