@@ -1,340 +1,515 @@
+require('dotenv').config();
 const express = require('express');
-const bodyParser = require('body-parser');
-const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
-const https = require('https');
+const crypto = require('crypto');
+const Database = require('better-sqlite3');
+const { GoogleGenAI } = require('@google/genai');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// 中间件配置
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+// 初始化 SQLite 数据库
+const db = new Database('data.db');
 
-// 初始化 SQLite 数据库（存放在项目根目录的 data.db）
-const dbFile = path.join(__dirname, 'data.db');
-const db = new sqlite3.Database(dbFile, (err) => {
-    if (err) {
-        console.error('数据库连接失败:', err.message);
-    } else {
-        console.log('成功连接到 SQLite 数据库: data.db');
-    }
-});
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    role TEXT DEFAULT 'staff',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS social_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform TEXT NOT NULL,
+    label TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS social_search_configs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    platform TEXT NOT NULL,
+    country TEXT DEFAULT '',
+    city TEXT DEFAULT '',
+    keywords TEXT NOT NULL,
+    gender TEXT DEFAULT '不限',
+    enabled INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS leads (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    phone TEXT,
+    source TEXT,
+    center TEXT,
+    created_at TEXT,
+    external_id TEXT,
+    category TEXT,
+    address TEXT,
+    website TEXT,
+    email TEXT,
+    latitude REAL,
+    longitude REAL,
+    maps_url TEXT
+  );
+  CREATE TABLE IF NOT EXISTS appointments (
+    appointment_number TEXT PRIMARY KEY,
+    staff_id TEXT,
+    phone TEXT,
+    date TEXT,
+    time TEXT,
+    status TEXT,
+    created_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS chat_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_phone TEXT,
+    platform TEXT,
+    sender TEXT,
+    message TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS ai_config (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    welcome_msg TEXT,
+    system_prompt TEXT
+  );
+  CREATE TABLE IF NOT EXISTS ai_secrets (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    encrypted_key TEXT NOT NULL,
+    iv TEXT NOT NULL,
+    auth_tag TEXT NOT NULL,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`);
 
-// 创建必要的表结构
-db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    )`);
-    
-    db.run(`CREATE TABLE IF NOT EXISTS leads (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
-        phone TEXT,
-        source TEXT,
-        status TEXT DEFAULT '新线索',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    db.run(`CREATE TABLE IF NOT EXISTS chat_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        role TEXT,
-        message TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-});
-
-// Helper: 调用 Google Gemini API
-function callGeminiAPI(apiKey, prompt, callback) {
-    const data = JSON.stringify({
-        contents: [{
-            parts: [{ text: prompt }]
-        }]
-    });
-
-    const options = {
-        hostname: 'generativelanguage.googleapis.com',
-        path: `/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(data)
-        }
-    };
-
-    const req = https.request(options, (res) => {
-        let responseBody = '';
-        res.on('data', (chunk) => { responseBody += chunk; });
-        res.on('end', () => {
-            try {
-                const parsed = JSON.parse(responseBody);
-                if (parsed.candidates && parsed.candidates[0].content.parts[0].text) {
-                    callback(null, parsed.candidates[0].content.parts[0].text);
-                } else {
-                    callback(new Error(parsed.error?.message || 'Gemini API 返回格式错误'));
-                }
-            } catch (e) {
-                callback(e);
-            }
-        });
-    });
-
-    req.on('error', (e) => { callback(e); });
-    req.write(data);
-    req.end();
+// 兼容字段升级
+for (const [column, type] of [
+  ['external_id', 'TEXT'], ['category', 'TEXT'], ['address', 'TEXT'],
+  ['website', 'TEXT'], ['email', 'TEXT'], ['latitude', 'REAL'],
+  ['longitude', 'REAL'], ['maps_url', 'TEXT']
+]) {
+  try { db.exec(`ALTER TABLE leads ADD COLUMN ${column} ${type}`); } catch (e) {}
 }
 
-// ================= API 路由 =================
+const defaultWelcome = "👋 您好！我是 Beauty Corner 专属美业助理，请问有什么可以帮您的？";
+const defaultPrompt = "You are a senior beauty consultant for a high-end beauty salon in Dubai. Professional, warm, and attentive. Detect language and reply in the same language.";
 
-// 1. 获取系统状态与配置
-app.get('/api/status', (req, res) => {
-    db.get(`SELECT value FROM settings WHERE key = 'gemini_api_key'`, (err, row) => {
-        res.json({
-            status: 'online',
-            hasApiKey: !!(row && row.value) || !!process.env.GEMINI_API_KEY
-        });
-    });
+const existingConfig = db.prepare('SELECT * FROM ai_config WHERE id = 1').get();
+if (!existingConfig) {
+  db.prepare('INSERT INTO ai_config (id, welcome_msg, system_prompt) VALUES (1, ?, ?)').run(defaultWelcome, defaultPrompt);
+}
+
+app.use(express.json());
+
+// 认证与安全
+const AUTH_SECRET = process.env.APP_ENCRYPTION_KEY || process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const COOKIE_NAME = 'alm_session';
+function signToken(payload) { const body=Buffer.from(JSON.stringify(payload)).toString('base64url'); const sig=crypto.createHmac('sha256',AUTH_SECRET).update(body).digest('base64url'); return body+'.'+sig; }
+function verifyToken(token) { try { const [body,sig]=String(token||'').split('.'); const expected=crypto.createHmac('sha256',AUTH_SECRET).update(body).digest(); const actual=Buffer.from(sig,'base64url'); if(actual.length!==expected.length||!crypto.timingSafeEqual(actual,expected)) return null; const d=JSON.parse(Buffer.from(body,'base64url').toString()); return d.exp>Date.now()?d:null; } catch { return null; } }
+function getSession(req) { const c=String(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(COOKIE_NAME+'=')); return c?verifyToken(decodeURIComponent(c.slice(COOKIE_NAME.length+1))):null; }
+function hashPassword(password,salt=crypto.randomBytes(16).toString('hex')) { return {salt,hash:crypto.scryptSync(password,salt,64).toString('hex')}; }
+function checkPassword(password,salt,hash) { const a=crypto.scryptSync(password,salt,64), b=Buffer.from(hash,'hex'); return a.length===b.length&&crypto.timingSafeEqual(a,b); }
+
+app.get('/api/auth/status',(req,res)=>{ const admin=db.prepare("SELECT id FROM users WHERE role='admin' LIMIT 1").get(); const session=getSession(req); res.json({setupRequired:!admin,authenticated:!!session,username:session?.username||null}); });
+app.post('/api/auth/setup',(req,res)=>{ if(db.prepare("SELECT id FROM users WHERE role='admin' LIMIT 1").get()) return res.status(409).json({error:'管理员已经创建。'}); const username=String(req.body?.username||'').trim(), password=String(req.body?.password||''); if(!username || password.length<6) return res.status(400).json({error:'用户名不能为空，密码至少6位'}); const h=hashPassword(password); db.prepare('INSERT INTO users(username,password,role) VALUES(?,?,?)').run(username,h.salt+':'+h.hash,'admin'); const token=signToken({username,exp:Date.now()+7*86400000}); res.setHeader('Set-Cookie',`${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800`); res.json({ok:true,username}); });
+app.post('/api/auth/login',(req,res)=>{ const username=String(req.body?.username||'').trim(), password=String(req.body?.password||''); const row=db.prepare("SELECT * FROM users WHERE username=? AND role='admin'").get(username); if(!row) return res.status(401).json({error:'账号或密码错误'}); const [salt,hash]=String(row.password).split(':'); const valid=checkPassword(password,salt,hash); if(!valid) return res.status(401).json({error:'账号或密码错误'}); const token=signToken({username,exp:Date.now()+7*86400000}); res.setHeader('Set-Cookie',`${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800`); res.json({ok:true,username}); });
+app.post('/api/auth/logout',(req,res)=>{res.setHeader('Set-Cookie',`${COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);res.json({ok:true});});
+
+app.use('/api',(req,res,next)=>{if(['/auth/status','/auth/setup','/auth/login','/auth/logout'].includes(req.path))return next();if(!getSession(req))return res.status(401).json({error:'请先登录',code:'AUTH_REQUIRED'});next();});
+
+// Gemini 初始化
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const ENC_KEY = crypto.createHash('sha256').update(AUTH_SECRET).digest();
+function encryptSecret(value){const iv=crypto.randomBytes(12),c=crypto.createCipheriv('aes-256-gcm',ENC_KEY,iv),data=Buffer.concat([c.update(value,'utf8'),c.final()]);return{encrypted_key:data.toString('base64'),iv:iv.toString('base64'),auth_tag:c.getAuthTag().toString('base64')};}
+function decryptSecret(row){const d=crypto.createDecipheriv('aes-256-gcm',ENC_KEY,Buffer.from(row.iv,'base64'));d.setAuthTag(Buffer.from(row.auth_tag,'base64'));return Buffer.concat([d.update(Buffer.from(row.encrypted_key,'base64')),d.final()]).toString('utf8');}
+function loadStoredKey(){try{const r=db.prepare('SELECT encrypted_key,iv,auth_tag FROM ai_secrets WHERE id=1').get();return r?decryptSecret(r):'';}catch{return '';}}
+let apiKey=(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||loadStoredKey()||'').trim();
+let ai=apiKey?new GoogleGenAI({apiKey}):null;
+
+app.get('/api/ai/status', (req, res) => {
+  res.json({ok:true,model:GEMINI_MODEL,configured:!!apiKey&&!!ai});
 });
 
-// 2. 保存 API Key
-app.post('/api/settings', (req, res) => {
-    const { apiKey } = req.body;
-    db.run(`INSERT OR REPLACE INTO settings (key, value) VALUES ('gemini_api_key', ?)`, [apiKey], (err) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
-        res.json({ success: true, message: 'API Key 保存成功！' });
-    });
+app.post('/api/ai/key',(req,res)=>{try{const key=String(req.body?.apiKey||'').trim();if(!key)return res.status(400).json({error:'请输入有效的 Key'});const e=encryptSecret(key);db.prepare(`INSERT INTO ai_secrets(id,encrypted_key,iv,auth_tag,updated_at) VALUES(1,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET encrypted_key=excluded.encrypted_key,iv=excluded.iv,auth_tag=excluded.auth_tag,updated_at=CURRENT_TIMESTAMP`).run(e.encrypted_key,e.iv,e.auth_tag);apiKey=key;ai=new GoogleGenAI({apiKey});res.json({ok:true,message:'API Key 保存成功'});}catch(err){res.status(500).json({error:err.message});}});
+
+app.post('/api/ai/key-test', async (req, res) => {
+  try {
+    if (!apiKey || !ai) return res.status(503).json({ ok: false, error: '未配置 Gemini API Key' });
+    const result = await ai.models.generateContent({ model: GEMINI_MODEL, contents: 'Reply OK' });
+    res.json({ ok: true, message: '连接成功', preview: String(result.text || '').slice(0, 50) });
+  } catch (err) { res.status(502).json({ ok: false, error: err.message }); }
 });
 
-// 3. AI 对话接口
-app.post('/api/chat', (req, res) => {
-    const { message } = req.body;
-    if (!message) return res.status(400).json({ error: '消息不能为空' });
-
-    // 优先从数据库读取 API Key，如果没有则取环境变量
-    db.get(`SELECT value FROM settings WHERE key = 'gemini_api_key'`, (err, row) => {
-        const apiKey = (row && row.value) || process.env.GEMINI_API_KEY;
-        if (!apiKey) {
-            return res.status(400).json({ error: '请先在后台配置 Gemini API Key！' });
-        }
-
-        // 记录用户消息
-        db.run(`INSERT INTO chat_logs (role, message) VALUES (?, ?)`, ['user', message]);
-
-        callGeminiAPI(apiKey, `你是迪拜高端美甲美睫沙龙(Beauty Corner Ladies Salon)的智能客服。请用热情、专业且带有多语言接待能力的语气回复以下客户咨询：\n\n客户：${message}`, (apiErr, reply) => {
-            if (apiErr) {
-                return res.status(500).json({ error: apiErr.message });
-            }
-            // 记录 AI 回复
-            db.run(`INSERT INTO chat_logs (role, message) VALUES (?, ?)`, ['ai', reply]);
-            res.json({ reply });
-        });
-    });
+app.get('/api/ai/config', (req, res) => {
+  res.json(db.prepare('SELECT welcome_msg, system_prompt FROM ai_config WHERE id = 1').get() || { welcome_msg: defaultWelcome, system_prompt: defaultPrompt });
 });
 
-// 4. 获取所有线索
+app.post('/api/ai/config', (req, res) => {
+  const { welcome_msg, system_prompt } = req.body || {};
+  db.prepare('UPDATE ai_config SET welcome_msg = ?, system_prompt = ? WHERE id = 1').run(welcome_msg || defaultWelcome, system_prompt || defaultPrompt);
+  res.json({ ok: true });
+});
+
+app.get('/api/dashboard/stats', (req, res) => {
+  const total = db.prepare('SELECT COUNT(*) as cnt FROM leads').get().cnt;
+  const fb = db.prepare("SELECT COUNT(*) as cnt FROM leads WHERE source LIKE '%Facebook%'").get().cnt;
+  const ig = db.prepare("SELECT COUNT(*) as cnt FROM leads WHERE source LIKE '%Instagram%'").get().cnt;
+  const tk = db.prepare("SELECT COUNT(*) as cnt FROM leads WHERE source LIKE '%TikTok%'").get().cnt;
+  res.json({ ok: true, total, fb, ig, tk });
+});
+
+app.get('/api/social-accounts', (req, res) => { res.json(db.prepare('SELECT * FROM social_accounts ORDER BY id DESC').all()); });
+app.post('/api/social-accounts', (req, res) => {
+  const { platform, label, profile_id } = req.body || {};
+  db.prepare('INSERT INTO social_accounts (platform, label, profile_id) VALUES (?, ?, ?)').run(platform, label, profile_id);
+  res.json({ ok: true });
+});
+app.delete('/api/social-accounts/:id', (req, res) => { db.prepare('DELETE FROM social_accounts WHERE id = ?').run(Number(req.params.id)); res.json({ ok: true }); });
+
+app.get('/api/appointments', (req, res) => { res.json(db.prepare('SELECT * FROM appointments ORDER BY created_at DESC').all()); });
+app.post('/api/appointments', (req, res) => {
+  const b = req.body || {};
+  const apptNo = 'APT-' + Date.now().toString().slice(-6);
+  db.prepare(`INSERT INTO appointments (appointment_number, staff_id, phone, date, time, status, created_at) VALUES (?, ?, ?, ?, ?, 'Confirmed', ?)`).run(apptNo, b.staff_id || 'Staff', b.phone, b.date, b.time, new Date().toISOString());
+  res.json({ ok: true, appointment_number: apptNo });
+});
+app.delete('/api/appointments/:no', (req, res) => { db.prepare('DELETE FROM appointments WHERE appointment_number = ?').run(req.params.no); res.json({ ok: true }); });
+
+// 免费真实商家搜索 (OpenStreetMap)
+const OSM_USER_AGENT = 'AILeadMaster/1.0';
+let lastNominatim = 0;
+async function nominatimGeocode(query) {
+  const wait = Math.max(0, 1100 - (Date.now() - lastNominatim));
+  if (wait) await new Promise(r => setTimeout(r, wait));
+  lastNominatim = Date.now();
+  const res = await fetch('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=' + encodeURIComponent(query), { headers: { 'User-Agent': OSM_USER_AGENT } });
+  const rows = await res.json();
+  if (!rows.length) throw new Error('未找到该城市/国家');
+  return { lat: Number(rows[0].lat), lon: Number(rows[0].lon), display_name: rows[0].display_name };
+}
+
+app.post('/api/maps/search', async (req, res) => {
+  try {
+    const { country, city, keyword } = req.body || {};
+    if (!country || !city || !keyword) return res.status(400).json({ ok: false, error: '请填写完整国家、城市和关键词' });
+    const loc = await nominatimGeocode(`${city}, ${country}`);
+    const query = `[out:json][timeout:25];(nwr(around:5000,${loc.lat},${loc.lon})[name~"${keyword}",i];nwr(around:5000,${loc.lat},${loc.lon})[shop];);out center tags 50;`;
+    const overpass = await fetch('https://overpass.private.coffee/api/interpreter', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'data=' + encodeURIComponent(query)
+    });
+    const data = await overpass.json();
+    const results = (data.elements || []).map(el => {
+      const tags = el.tags || {};
+      const name = tags.name || tags.brand;
+      if (!name) return null;
+      const id = `osm:${el.type}:${el.id}`;
+      return {
+        id, external_id: id, name, phone: tags.phone || tags['contact:phone'] || '',
+        source: 'OpenStreetMap', center: `${city}, ${country}`, created_at: new Date().toISOString(),
+        category: tags.shop || tags.amenity || 'business', address: [tags['addr:street'], tags['addr:city']].filter(Boolean).join(', '),
+        website: tags.website || '', email: tags.email || '', latitude: el.lat || el.center?.lat, longitude: el.lon || el.center?.lon,
+        maps_url: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name + ', ' + city)}`
+      };
+    }).filter(Boolean);
+
+    const insert = db.prepare(`INSERT INTO leads (id,name,phone,source,center,created_at,external_id,category,address,website,email,latitude,longitude,maps_url)
+      VALUES (@id,@name,@phone,@source,@center,@created_at,@external_id,@category,@address,@website,@email,@latitude,@longitude,@maps_url)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone`);
+    results.forEach(r => insert.run(r));
+    res.json({ ok: true, results, searched: results.length, saved: results.length, location: loc.display_name, notice: '搜索成功' });
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err.message });
+  }
+});
+
 app.get('/api/leads', (req, res) => {
-    db.all(`SELECT * FROM leads ORDER BY id DESC`, (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
-    });
+  res.json({ ok: true, leads: db.prepare("SELECT * FROM leads ORDER BY created_at DESC LIMIT 100").all() });
 });
 
-// 5. 添加新线索
-app.post('/api/leads', (req, res) => {
-    const { name, phone, source } = req.body;
-    db.run(`INSERT INTO leads (name, phone, source) VALUES (?, ?, ?)`, [name, phone, source || '手动录入'], function(err) {
-        if (err) return res.status(500).json({ success: false, error: err.message });
-        res.json({ success: true, id: this.lastID });
+// AI 智能客服接口
+app.post('/api/ai/chat-reply', async (req, res) => {
+  const { customer_phone, customer_message, platform } = req.body || {};
+  const phone = String(customer_phone || "Web Visitor").trim();
+  const message = String(customer_message || "").trim();
+  if (!message) return res.status(400).json({ ok: false, error: "消息不能为空" });
+  if (!apiKey || !ai) return res.status(503).json({ ok: false, error: "未配置 Gemini API Key" });
+
+  try {
+    db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'customer', ?, ?)`).run(phone, platform || 'Website', message, new Date().toISOString());
+    const cfg = db.prepare('SELECT system_prompt FROM ai_config WHERE id = 1').get();
+
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: `Customer message: ${message}`,
+      config: {
+        systemInstruction: cfg?.system_prompt || defaultPrompt,
+        temperature: 0.3,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            reply: { type: "STRING" },
+            detected_language: { type: "STRING" },
+            has_booking_intent: { type: "BOOLEAN" },
+            appointment_date: { type: "STRING", nullable: true },
+            appointment_time: { type: "STRING", nullable: true }
+          },
+          required: ["reply", "detected_language", "has_booking_intent", "appointment_date", "appointment_time"]
+        }
+      }
     });
+
+    const parsed = JSON.parse(response.text || '{}');
+    const aiReply = parsed.reply || "Hello! How can I help you today?";
+    db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'ai', ?, ?)`).run(phone, platform || 'Website', aiReply, new Date().toISOString());
+
+    let apptNumber = null;
+    if (parsed.has_booking_intent && parsed.appointment_date && parsed.appointment_time && phone) {
+      apptNumber = 'APT-' + Date.now().toString().slice(-6);
+      db.prepare(`INSERT INTO appointments (appointment_number, staff_id, phone, date, time, status, created_at) VALUES (?, 'Gemini AI', ?, ?, ?, 'Confirmed', ?)`).run(apptNumber, phone, parsed.appointment_date, parsed.appointment_time, new Date().toISOString());
+    }
+
+    res.json({ ok: true, ai_reply: aiReply, detected_language: parsed.detected_language, auto_appointment_created: !!apptNumber, appointment_number: apptNumber });
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err.message });
+  }
 });
 
-// ================= 前端单页面 (HTML/CSS/JS) =================
-app.get('*', (req, res) => {
-    res.send(`
-<!DOCTYPE html>
+app.get('/api/ai/chat-logs', (req, res) => {
+  res.json(db.prepare('SELECT * FROM chat_logs ORDER BY id DESC LIMIT 50').all().reverse());
+});
+
+// 前端 UI 页面
+app.get('/', (req, res) => {
+  res.send(`<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dubai Beauty CRM & AI 智能营销控制台</title>
-    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Lead Master - 美业 CRM 后台</title>
+  <style>
+    :root{--bg:#f8fafc;--card:#fff;--text:#1e293b;--primary:#6366f1;--border:#e2e8f0}
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);margin:0;padding:20px}
+    .container{max-width:1200px;margin:0 auto}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:24px;margin-bottom:20px;box-shadow:0 4px 6px -1px rgba(0,0,0,.05)}
+    h2,h3{margin-top:0}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:20px}
+    .stat-box{background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;padding:20px;border-radius:12px;font-weight:bold}
+    .stat-box.purple{background:linear-gradient(135deg,#ec4899,#f43f5e)}
+    .stat-box.emerald{background:linear-gradient(135deg,#10b981,#059669)}
+    input,select,textarea{width:100%;padding:10px 14px;border:1px solid var(--border);border-radius:8px;font-size:14px;margin-top:6px;box-sizing:border-box}
+    button{background:var(--primary);color:#fff;border:0;padding:10px 18px;border-radius:8px;font-weight:bold;cursor:pointer;margin-top:10px}
+    button:hover{opacity:.9}button.danger{background:#ef4444}button.success{background:#10b981}
+    table{width:100%;border-collapse:collapse;margin-top:10px;font-size:14px}
+    th,td{border-bottom:1px solid var(--border);padding:10px;text-align:left}th{background:#f1f5f9;color:#475569}
+    .chat-box{height:300px;border:1px solid var(--border);border-radius:8px;padding:12px;overflow-y:auto;background:#f8fafc;margin-bottom:10px;display:flex;flex-direction:column;gap:8px}
+    .msg{padding:8px 12px;border-radius:8px;max-width:80%;font-size:13px}
+    .msg.customer{background:#fff;border:1px solid var(--border);align-self:flex-start}
+    .msg.ai{background:#6366f1;color:#fff;align-self:flex-end}
+    #authModal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:999}
+    #authCard{background:#fff;padding:30px;border-radius:16px;width:360px;box-shadow:0 20px 25px -5px rgba(0,0,0,.1)}
+  </style>
 </head>
-<body class="bg-slate-50 min-h-screen font-sans text-slate-800">
-    <div class="max-w-6xl mx-auto px-4 py-8">
-        <!-- 头部 -->
-        <header class="bg-white rounded-2xl shadow-sm p-6 mb-6 flex flex-col md:flex-row justify-between items-center gap-4">
-            <div>
-                <h1 class="text-2xl font-bold text-slate-900">✨ Dubai Beauty CRM 自动化管理后台</h1>
-                <p class="text-sm text-slate-500 mt-1">云端 24 小时运行中 | Gemini 2.5 驱动</p>
-            </div>
-            <div class="flex items-center gap-3">
-                <span id="status-badge" class="px-3 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800">状态检测中...</span>
-            </div>
-        </header>
+<body>
+  <div id="authModal">
+    <div id="authCard">
+      <h3 id="authModalTitle">管理员登录</h3>
+      <form id="authForm">
+        <input id="authName" placeholder="用户名" required>
+        <input id="authPass" type="password" placeholder="密码（至少6位）" required>
+        <button type="submit" style="width:100%">进入系统</button>
+        <p id="authErr" style="color:#ef4444;font-size:13px;margin-top:8px"></p>
+      </form>
+    </div>
+  </div>
 
-        <!-- 配置卡片 -->
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
-            <div class="bg-white rounded-2xl shadow-sm p-6 md:col-span-1">
-                <h2 class="text-lg font-semibold mb-4 text-slate-800">🔑 Gemini API Key 设置</h2>
-                <div class="space-y-3">
-                    <input type="password" id="api-key-input" placeholder="输入 AIza... 密钥" class="w-full px-4 py-2 border rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm">
-                    <button onclick="saveApiKey()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 rounded-xl text-sm transition">保存 API Key</button>
-                    <p id="key-msg" class="text-xs text-center text-slate-500 mt-1"></p>
-                </div>
-            </div>
-
-            <!-- AI 聊天测试卡片 -->
-            <div class="bg-white rounded-2xl shadow-sm p-6 md:col-span-2 flex flex-col h-[360px]">
-                <h2 class="text-lg font-semibold mb-3 text-slate-800">💬 AI 智能客服对话测试</h2>
-                <div id="chat-box" class="flex-1 border rounded-xl p-3 overflow-y-auto bg-slate-50 text-sm space-y-2 mb-3">
-                    <div class="text-slate-400 text-center text-xs">发送消息测试 Gemini AI 响应...</div>
-                </div>
-                <div class="flex gap-2">
-                    <input type="text" id="chat-input" placeholder="输入咨询内容，例如：我想预约明天下午的美甲..." class="flex-1 px-4 py-2 border rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm" onkeypress="if(event.key==='Enter') sendChat()">
-                    <button onclick="sendChat()" class="bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2 rounded-xl text-sm font-medium transition">发送</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- 客户线索表格 -->
-        <div class="bg-white rounded-2xl shadow-sm p-6">
-            <div class="flex justify-between items-center mb-4">
-                <h2 class="text-lg font-semibold text-slate-800">📋 客户线索列表 (Leads)</h2>
-                <button onclick="loadLeads()" class="text-sm text-indigo-600 hover:underline">刷新列表</button>
-            </div>
-            <div class="overflow-x-auto">
-                <table class="w-full text-left border-collapse text-sm">
-                    <thead>
-                        <tr class="border-b text-slate-400 font-medium">
-                            <th class="py-3 px-4">ID</th>
-                            <th class="py-3 px-4">客户姓名</th>
-                            <th class="py-3 px-4">电话号码</th>
-                            <th class="py-3 px-4">来源渠道</th>
-                            <th class="py-3 px-4">状态</th>
-                            <th class="py-3 px-4">录入时间</th>
-                        </tr>
-                    </thead>
-                    <tbody id="leads-table-body">
-                        <tr><td colspan="6" class="py-4 text-center text-slate-400">加载中...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
+  <div class="container" id="appContent" style="display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <h2>🚀 AI Lead Master & 美业 CRM 控制台</h2>
+      <button class="danger" onclick="logout()" style="margin:0">退出登录</button>
     </div>
 
-    <script>
-        // 检查系统状态
-        async function checkStatus() {
-            try {
-                const res = await fetch('/api/status');
-                const data = await res.json();
-                const badge = document.getElementById('status-badge');
-                if (data.hasApiKey) {
-                    badge.className = 'px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800';
-                    badge.innerText = '🟢 已连接 (AI就绪)';
-                } else {
-                    badge.className = 'px-3 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800';
-                    badge.innerText = '🟡 运行中 (请配置API Key)';
-                }
-            } catch (e) {
-                console.error(e);
-            }
+    <!-- 统计卡片 -->
+    <div class="grid">
+      <div class="stat-box"><div>总线索量</div><div id="statTotal" style="font-size:28px;margin-top:5px">0</div></div>
+      <div class="stat-box purple"><div>Facebook 线索</div><div id="statFb" style="font-size:28px;margin-top:5px">0</div></div>
+      <div class="stat-box emerald"><div>预约单数量</div><div id="statAppt" style="font-size:28px;margin-top:5px">0</div></div>
+    </div>
+
+    <!-- AI 配置与密钥设置 -->
+    <div class="card">
+      <h3>🔐 Gemini API Key 设置</h3>
+      <div style="display:flex;gap:10px">
+        <input id="apiKeyInput" type="password" placeholder="粘贴 Google AI Studio Gemini API Key">
+        <button onclick="saveApiKey()" style="white-space:nowrap">保存 Key</button>
+        <button class="success" onclick="testKey()" style="white-space:nowrap">测试连接</button>
+      </div>
+      <p id="keyStatus" style="font-size:13px;color:#64748b;margin-top:8px">状态：检查中...</p>
+    </div>
+
+    <!-- AI 助理对话测试 -->
+    <div class="card">
+      <h3>🤖 AI 美业客服助理实时测试</h3>
+      <div class="chat-box" id="chatContainer">
+        <div class="msg ai">👋 您好！我是 Beauty Corner 专属美业助理，请问有什么可以帮您的？</div>
+      </div>
+      <div style="display:flex;gap:10px">
+        <input id="chatPhone" placeholder="客户手机号 (可选)" style="width:180px">
+        <input id="chatMsg" placeholder="输入咨询内容 (例如: 帮我预约明天下午3点美甲)" onkeypress="if(event.key==='Enter')sendChat()">
+        <button onclick="sendChat()" style="white-space:nowrap">发送</button>
+      </div>
+    </div>
+
+    <!-- 地图商家搜索 -->
+    <div class="card">
+      <h3>🗺️ 免费地图商家获客 (OpenStreetMap)</h3>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end">
+        <div><label>国家</label><input id="mapCountry" value="United Arab Emirates"></div>
+        <div><label>城市</label><input id="mapCity" value="Dubai"></div>
+        <div><label>关键词</label><input id="mapKeyword" value="salon"></div>
+        <button onclick="searchMaps()">搜索商家</button>
+      </div>
+      <div style="margin-top:15px;overflow-x:auto">
+        <table>
+          <thead><tr><th>商家名称</th><th>类别</th><th>电话</th><th>网站</th><th>地址</th><th>操作</th></tr></thead>
+          <tbody id="mapResults"><tr><td colspan="6" style="text-align:center;color:#64748b">暂无搜索结果</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    async function init() {
+      const st = await fetch('/api/auth/status').then(r => r.json());
+      if (st.authenticated) {
+        document.getElementById('authModal').style.display = 'none';
+        document.getElementById('appContent').style.display = 'block';
+        loadAll();
+      } else {
+        document.getElementById('authModalTitle').textContent = st.setupRequired ? '首次使用：创建管理员账号' : '管理员登录';
+      }
+    }
+
+    document.getElementById('authForm').addEventListener('submit', async e => {
+      e.preventDefault();
+      const st = await fetch('/api/auth/status').then(r => r.json());
+      const endpoint = st.setupRequired ? '/api/auth/setup' : '/api/auth/login';
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: document.getElementById('authName').value, password: document.getElementById('authPass').value })
+      });
+      const data = await res.json();
+      if (res.ok) { location.reload(); } else { document.getElementById('authErr').textContent = data.error; }
+    });
+
+    async function logout() {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      location.reload();
+    }
+
+    async function loadAll() {
+      const stats = await fetch('/api/dashboard/stats').then(r => r.json());
+      document.getElementById('statTotal').textContent = stats.total;
+      document.getElementById('statFb').textContent = stats.fb;
+      
+      const appts = await fetch('/api/appointments').then(r => r.json());
+      document.getElementById('statAppt').textContent = appts.length;
+
+      const aiStatus = await fetch('/api/ai/status').then(r => r.json());
+      document.getElementById('keyStatus').textContent = aiStatus.configured ? '状态：Gemini AI 已就绪 (Online)' : '状态：未配置 API Key';
+
+      loadChatLogs();
+      loadLeads();
+    }
+
+    async function saveApiKey() {
+      const apiKey = document.getElementById('apiKeyInput').value.trim();
+      const res = await fetch('/api/ai/key', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey }) });
+      const data = await res.json();
+      alert(data.message || data.error);
+      loadAll();
+    }
+
+    async function testKey() {
+      const res = await fetch('/api/ai/key-test', { method: 'POST' });
+      const data = await res.json();
+      alert(data.ok ? '连接成功！' : '连接失败: ' + data.error);
+    }
+
+    async function sendChat() {
+      const phone = document.getElementById('chatPhone').value.trim();
+      const message = document.getElementById('chatMsg').value.trim();
+      if (!message) return;
+      const box = document.getElementById('chatContainer');
+      box.innerHTML += \`<div class="msg customer">[\${phone || 'Web'}] \${message}</div>\`;
+      document.getElementById('chatMsg').value = '';
+      box.scrollTop = box.scrollHeight;
+
+      const res = await fetch('/api/ai/chat-reply', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customer_phone: phone, customer_message: message })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        box.innerHTML += \`<div class="msg ai">\${data.ai_reply}</div>\`;
+        if (data.auto_appointment_created) {
+          alert('🔥 成功识别预约意向并生成预约单：' + data.appointment_number);
+          loadAll();
         }
+      } else {
+        box.innerHTML += \`<div class="msg customer" style="background:#fee2e2">错误: \${data.error}</div>\`;
+      }
+      box.scrollTop = box.scrollHeight;
+    }
 
-        // 保存 API Key
-        async function saveApiKey() {
-            const apiKey = document.getElementById('api-key-input').value.trim();
-            const msg = document.getElementById('key-msg');
-            if (!apiKey) {
-                msg.innerText = '请输入有效的 Key';
-                msg.className = 'text-xs text-center text-red-500 mt-1';
-                return;
-            }
-            try {
-                const res = await fetch('/api/settings', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ apiKey })
-                });
-                const data = await res.json();
-                if (data.success) {
-                    msg.innerText = '保存成功！';
-                    msg.className = 'text-xs text-center text-emerald-600 mt-1';
-                    checkStatus();
-                } else {
-                    msg.innerText = '保存失败: ' + data.error;
-                    msg.className = 'text-xs text-center text-red-500 mt-1';
-                }
-            } catch (e) {
-                msg.innerText = '请求出错';
-                msg.className = 'text-xs text-center text-red-500 mt-1';
-            }
-        }
+    async function loadChatLogs() {
+      const logs = await fetch('/api/ai/chat-logs').then(r => r.json());
+      const box = document.getElementById('chatContainer');
+      if (logs.length > 0) {
+        box.innerHTML = '';
+        logs.forEach(l => {
+          box.innerHTML += \`<div class="msg \${l.sender === 'ai' ? 'ai' : 'customer'}">[\${l.customer_phone}] \${l.message}</div>\`;
+        });
+        box.scrollTop = box.scrollHeight;
+      }
+    }
 
-        // 发送聊天测试
-        async function sendChat() {
-            const input = document.getElementById('chat-input');
-            const chatBox = document.getElementById('chat-box');
-            const text = input.value.trim();
-            if (!text) return;
+    async function searchMaps() {
+      const country = document.getElementById('mapCountry').value;
+      const city = document.getElementById('mapCity').value;
+      const keyword = document.getElementById('mapKeyword').value;
+      const tbody = document.getElementById('mapResults');
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center">正在搜索...</td></tr>';
 
-            chatBox.innerHTML += \`<div class="text-right"><span class="inline-block bg-indigo-600 text-white px-3 py-1.5 rounded-xl">\${text}</span></div>\`;
-            input.value = '';
-            chatBox.scrollTop = chatBox.scrollHeight;
+      const res = await fetch('/api/maps/search', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ country, city, keyword })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        tbody.innerHTML = '';
+        if (!data.results.length) { tbody.innerHTML = '<tr><td colspan="6" style="text-align:center">未找到匹配商家</td></tr>'; return; }
+        data.results.forEach(r => {
+          tbody.innerHTML += \`<tr><td>\${r.name}</td><td>\${r.category}</td><td>\${r.phone || '-'}</td><td><a href="\${r.website}" target="_blank">\${r.website ? '链接' : '-'}</a></td><td>\-</td><td><a href="\${r.maps_url}" target="_blank">Google Maps</a></td></tr>\`;
+        });
+        loadAll();
+      } else {
+        tbody.innerHTML = \`<tr><td colspan="6" style="text-align:center;color:red">搜索失败: \${data.error}</td></tr>\`;
+      }
+    }
 
-            try {
-                const res = await fetch('/api/chat', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: text })
-                });
-                const data = await res.json();
-                if (data.reply) {
-                    chatBox.innerHTML += \`<div class="text-left"><span class="inline-block bg-white border px-3 py-1.5 rounded-xl text-slate-700">\${data.reply}</span></div>\`;
-                } else {
-                    chatBox.innerHTML += \`<div class="text-left text-red-500 text-xs">错误: \${data.error}</div>\`;
-                }
-            } catch (e) {
-                chatBox.innerHTML += \`<div class="text-left text-red-500 text-xs">网络请求失败</div>\`;
-            }
-            chatBox.scrollTop = chatBox.scrollHeight;
-        }
+    async function loadLeads() {}
 
-        // 加载线索
-        async function loadLeads() {
-            const tbody = document.getElementById('leads-table-body');
-            try {
-                const res = await fetch('/api/leads');
-                const leads = await res.json();
-                if (leads.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="6" class="py-4 text-center text-slate-400">暂无客户线索</td></tr>';
-                    return;
-                }
-                tbody.innerHTML = leads.map(l => \`
-                    <tr class="border-b hover:bg-slate-50">
-                        <td class="py-3 px-4 text-slate-400">#\${l.id}</td>
-                        <td class="py-3 px-4 font-medium">\${l.name || '未命名'}</td>
-                        <td class="py-3 px-4">\${l.phone || '-'}</td>
-                        <td class="py-3 px-4">\${l.source}</td>
-                        <td class="py-3 px-4"><span class="px-2 py-1 bg-emerald-50 text-emerald-700 rounded-md text-xs">\${l.status}</span></td>
-                        <td class="py-3 px-4 text-slate-400 text-xs">\${l.created_at}</td>
-                    </tr>
-                \`).join('');
-            } catch (e) {
-                tbody.innerHTML = '<tr><td colspan="6" class="py-4 text-center text-red-500">加载失败</td></tr>';
-            }
-        }
-
-        // 初始化加载
-        checkStatus();
-        loadLeads();
-    </script>
+    init();
+  </script>
 </body>
 </html>
-    `);
+  `);
 });
 
 app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+  console.log(`Server is running on port ${PORT}`);
 });
