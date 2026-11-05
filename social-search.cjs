@@ -3,7 +3,7 @@ const express = require("express");
 module.exports = function createSocialSearchModule(db, runningAccounts) {
   const router = express.Router();
 
-  // 1. 初始化数据库表
+  // 初始化社交搜索配置表
   db.exec(`
     CREATE TABLE IF NOT EXISTS social_search_configs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -22,20 +22,17 @@ module.exports = function createSocialSearchModule(db, runningAccounts) {
   const validPlatforms = ["Facebook", "Instagram", "TikTok"];
   const validGenders = ["不限", "男性", "女性"];
 
-  // 2. 获取所有搜索配置列表
+  // 获取所有搜索配置列表
   router.get("/", (req, res) => {
     try {
-      const rows = db.prepare(`
-        SELECT * FROM social_search_configs
-        ORDER BY id DESC
-      `).all();
+      const rows = db.prepare(`SELECT * FROM social_search_configs ORDER BY id DESC`).all();
       res.json(rows);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  // 3. 创建新的搜索任务配置
+  // 创建新的搜索任务配置
   router.post("/", (req, res) => {
     const b = req.body || {};
     const accountId = Number(b.account_id);
@@ -57,8 +54,7 @@ module.exports = function createSocialSearchModule(db, runningAccounts) {
 
     try {
       const result = db.prepare(`
-        INSERT INTO social_search_configs
-        (account_id, platform, country, city, keywords, gender)
+        INSERT INTO social_search_configs (account_id, platform, country, city, keywords, gender)
         VALUES (?, ?, ?, ?, ?, ?)
       `).run(accountId, platform, country, city, keywords, gender);
 
@@ -68,36 +64,28 @@ module.exports = function createSocialSearchModule(db, runningAccounts) {
     }
   });
 
-  // 4. 删除搜索任务
+  // 删除搜索任务
   router.delete("/:id", (req, res) => {
     try {
-      const result = db.prepare(`
-        DELETE FROM social_search_configs WHERE id = ?
-      `).run(Number(req.params.id));
-
+      const result = db.prepare(`DELETE FROM social_search_configs WHERE id = ?`).run(Number(req.params.id));
       res.json({ ok: result.changes > 0 });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  // 5. 启用或停用搜索任务
+  // 启用或停用搜索任务
   router.patch("/:id", (req, res) => {
     try {
       const enabled = req.body.enabled ? 1 : 0;
-      const result = db.prepare(`
-        UPDATE social_search_configs
-        SET enabled = ?
-        WHERE id = ?
-      `).run(enabled, Number(req.params.id));
-
+      const result = db.prepare(`UPDATE social_search_configs SET enabled = ? WHERE id = ?`).run(enabled, Number(req.params.id));
       res.json({ ok: result.changes > 0 });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
   });
 
-  // 6. 执行搜索：在对应账号的独立浏览器中打开定向页面
+  // 执行搜索：在对应账号的独立浏览器中打开定向页面
   router.post("/:id/run", async (req, res) => {
     try {
       const config = db.prepare(`
@@ -114,13 +102,11 @@ module.exports = function createSocialSearchModule(db, runningAccounts) {
         return res.status(400).json({ error: "该搜索任务已停用" });
       }
 
-      // 检查独立浏览器环境是否已启动
       const accountInstance = runningAccounts ? runningAccounts.get(config.profile_id) : null;
       if (!accountInstance || !accountInstance.page) {
         return res.status(400).json({ error: "请先启动对应账号的独立浏览器实例" });
       }
 
-      // 拼装搜索关键字和目标 URL
       const query = [config.keywords, config.city, config.country].filter(Boolean).join(" ");
       const encoded = encodeURIComponent(query);
 
@@ -135,7 +121,6 @@ module.exports = function createSocialSearchModule(db, runningAccounts) {
         return res.status(400).json({ error: "不支持的平台类型" });
       }
 
-      // 在独立浏览器页面中跳转
       await accountInstance.page.goto(url, {
         waitUntil: "domcontentloaded",
         timeout: 60000
