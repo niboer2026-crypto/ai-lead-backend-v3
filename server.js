@@ -121,7 +121,7 @@ function encryptSecret(value){const iv=crypto.randomBytes(12),c=crypto.createCip
 function decryptSecret(row){const d=crypto.createDecipheriv('aes-256-gcm',ENC_KEY,Buffer.from(row.iv,'base64'));d.setAuthTag(Buffer.from(row.auth_tag,'base64'));return Buffer.concat([d.update(Buffer.from(row.encrypted_key,'base64')),d.final()]).toString('utf8');}
 function loadStoredKey(){try{const r=db.prepare('SELECT encrypted_key,iv,auth_tag FROM ai_secrets WHERE id=1').get();return r?decryptSecret(r):'';}catch{return '';}}
 
-// 🚀 获取 API Key 池（支持英文逗号分隔填入多个 Key）
+// 🚀 获取 API Key 池（支持 Gemini 多个 Key，也支持配置豆包 Key）
 function getApiKeyPool() {
   const envKeys = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').split(',').map(k => k.trim()).filter(Boolean);
   const stored = loadStoredKey();
@@ -129,21 +129,47 @@ function getApiKeyPool() {
   return Array.from(new Set([...envKeys, ...storedKeys]));
 }
 
-// 🛡️ 强制对齐官方最新要求的 gemini-3.8-flash 模型，支持多 Key 轮询
-async function callGeminiMultiKeyPool(promptText, systemPrompt) {
-  const keys = getApiKeyPool();
-  if (keys.length === 0) throw new Error("未配置任何有效的 Gemini API Key");
+// 🌐 调用字节跳动豆包大模型（火山方舟 OpenAI 兼容接口）
+async function callDoubao(promptText, systemPrompt) {
+  const doubaoKey = process.env.DOUBAO_API_KEY;
+  const endpointId = process.env.DOUBAO_ENDPOINT_ID; // 例如: ep-2024xxxxxxx
+  if (!doubaoKey || !endpointId) throw new Error("未配置豆包 API Key 或推理接入点 ID");
 
-  // 严格使用官方最新指定的 gemini-3.8-flash
-  const models = ["gemini-3.8-flash"];
+  const response = await fetch("https://ark.cn-beijing.volces.com/api/v3/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${doubaoKey}`
+    },
+    body: JSON.stringify({
+      model: endpointId,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: promptText }
+      ],
+      temperature: 0.7
+    })
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error?.message || "豆包 API 请求失败");
+  }
+  return data.choices?.[0]?.message?.content || "";
+}
+
+// 🛡️ 终极容灾引擎：优先走 Gemini 3.8-flash 多 Key 轮询，若全部失败则自动降级兜底调用豆包！
+async function callSmartAI(promptText, systemPrompt) {
+  const keys = getApiKeyPool();
   let lastError = null;
 
-  for (const apiKey of keys) {
-    const aiClient = new GoogleGenAI({ apiKey });
-    for (const model of models) {
+  // 1. 优先尝试 Gemini 3.8-flash
+  if (keys.length > 0) {
+    for (const apiKey of keys) {
       try {
+        const aiClient = new GoogleGenAI({ apiKey });
         const response = await aiClient.models.generateContent({
-          model: model,
+          model: "gemini-3.8-flash",
           contents: promptText,
           config: {
             systemInstruction: systemPrompt,
@@ -151,31 +177,46 @@ async function callGeminiMultiKeyPool(promptText, systemPrompt) {
           }
         });
         if (response && response.text) {
-          return response.text;
+          return `${response.text}`;
         }
       } catch (err) {
         lastError = err;
-        console.warn(`[Pool Warning] Key ending in ...${apiKey.slice(-4)} failed: ${err.message}`);
+        console.warn(`[Gemini Pool] Key ending in ...${apiKey.slice(-4)} failed: ${err.message}`);
       }
     }
   }
 
-  throw lastError || new Error("所有 API Key 池中的账号调用均失败");
+  // 2. 如果 Gemini 全部失败或未配 Key，自动无缝切换到豆包大模型兜底！
+  if (process.env.DOUBAO_API_KEY && process.env.DOUBAO_ENDPOINT_ID) {
+    try {
+      console.log("[Fallback] Switching to Doubao AI backend...");
+      const doubaoReply = await callDoubao(promptText, systemPrompt);
+      if (doubaoReply) return `${doubaoReply}`;
+    } catch (doubaoErr) {
+      console.warn(`[Doubao Fallback] Failed: ${doubaoErr.message}`);
+    }
+  }
+
+  throw lastError || new Error("所有 AI 通道（Gemini 及豆包备用）均调用失败，请检查 API Key 配置");
 }
 
 app.get('/api/ai/status', (req, res) => {
   const keysCount = getApiKeyPool().length;
-  res.json({ok:true,model:"gemini-3.8-flash (Multi-Key Pool)",configured:keysCount>0});
+  const hasDoubao = !!process.env.DOUBAO_API_KEY;
+  res.json({
+    ok: true,
+    model: "Gemini 3.8-flash + Doubao Dual-Engine",
+    configured: keysCount > 0 || hasDoubao,
+    details: `Gemini Keys: ${keysCount}, Doubao Enabled: ${hasDoubao}`
+  });
 });
 
 app.post('/api/ai/key',(req,res)=>{try{const key=String(req.body?.apiKey||'').trim();if(!key)return res.status(400).json({error:'请输入有效的 Key'});const e=encryptSecret(key);db.prepare(`INSERT INTO ai_secrets(id,encrypted_key,iv,auth_tag,updated_at) VALUES(1,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET encrypted_key=excluded.encrypted_key,iv=excluded.iv,auth_tag=excluded.auth_tag,updated_at=CURRENT_TIMESTAMP`).run(e.encrypted_key,e.iv,e.auth_tag);res.json({ok:true,message:'API Key 保存成功'});}catch(err){res.status(500).json({error:err.message});}});
 
 app.post('/api/ai/key-test', async (req, res) => {
   try {
-    const keys = getApiKeyPool();
-    if (keys.length === 0) return res.status(503).json({ ok: false, error: '未配置任何 Gemini API Key' });
-    const text = await callGeminiMultiKeyPool('Reply OK', 'You are a helpful assistant.');
-    res.json({ ok: true, message: `连接成功 (当前 Key 池共 ${keys.length} 个可用)`, preview: String(text).slice(0, 50) });
+    const text = await callSmartAI('Reply OK', 'You are a helpful assistant.');
+    res.json({ ok: true, message: `双引擎连接成功！`, preview: String(text).slice(0, 50) });
   } catch (err) { res.status(502).json({ ok: false, error: err.message }); }
 });
 
@@ -276,19 +317,16 @@ app.post('/api/ai/chat-reply', async (req, res) => {
     const message = String(customer_message || "").trim();
     if (!message) return res.status(400).json({ ok: false, error: "消息不能为空" });
 
-    const keys = getApiKeyPool();
-    if (keys.length === 0) return res.status(503).json({ ok: false, error: "未配置任何 Gemini API Key" });
-
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'customer', ?, ?)`).run(phone, platform || 'Website', message, new Date().toISOString());
     const cfg = db.prepare('SELECT system_prompt FROM ai_config WHERE id = 1').get();
 
-    const aiReply = await callGeminiMultiKeyPool(message, cfg?.system_prompt || defaultPrompt);
+    const aiReply = await callSmartAI(message, cfg?.system_prompt || defaultPrompt);
 
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'ai', ?, ?)`).run(phone, platform || 'Website', aiReply, new Date().toISOString());
 
     res.json({ ok: true, ai_reply: aiReply, detected_language: "自动识别", auto_appointment_created: false, appointment_number: null });
   } catch (err) {
-    res.status(502).json({ ok: false, error: "Gemini 响应失败: " + err.message });
+    res.status(502).json({ ok: false, error: "AI 响应失败: " + err.message });
   } finally {
     isChatBusy = false;
   }
@@ -367,7 +405,7 @@ app.get('/', (req, res) => {
 
     <!-- AI 助理对话测试 -->
     <div class="card">
-      <h3>🤖 AI 美业客服助理实时测试 (gemini-3.8-flash 高可用版)</h3>
+      <h3>🤖 AI 美业客服助理实时测试 (Gemini + 豆包双引擎版)</h3>
       <div class="chat-box" id="chatContainer">
         <div class="msg ai">👋 您好！我是 Beauty Corner 专属美业助理，请问有什么可以帮您的？</div>
       </div>
@@ -435,7 +473,7 @@ app.get('/', (req, res) => {
       document.getElementById('statAppt').textContent = appts.length;
 
       const aiStatus = await fetch('/api/ai/status').then(r => r.json());
-      document.getElementById('keyStatus').textContent = aiStatus.configured ? `状态：Gemini 3.8-flash Key池就绪 (${aiStatus.model})` : '状态：未配置 API Key';
+      document.getElementById('keyStatus').textContent = aiStatus.configured ? `状态：双引擎就绪 (${aiStatus.model})` : '状态：未配置任何 AI Key';
 
       loadChatLogs();
       loadLeads();
