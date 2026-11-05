@@ -60,7 +60,21 @@ db.exec(`
     message TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS ai_config (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    welcome_msg TEXT,
+    system_prompt TEXT
+  );
 `);
+
+// 初始默认 AI 欢迎词与提示词（美业专属智能助理）
+const defaultWelcome = "👋 您好！我是您的专属美业助理，请问有什么我可以帮您的？";
+const defaultPrompt = "You are a senior beauty consultant & personal assistant for a high-end beauty brand in the Middle East (Dubai, Riyadh, Doha). Professional, warm, and attentive. Never call yourself AI Sales.";
+
+const existingConfig = db.prepare('SELECT * FROM ai_config WHERE id = 1').get();
+if (!existingConfig) {
+  db.prepare('INSERT INTO ai_config (id, welcome_msg, system_prompt) VALUES (1, ?, ?)').run(defaultWelcome, defaultPrompt);
+}
 
 // 强制同步超管账号：dubai / lcaizxy13
 const superAdminUser = 'dubai';
@@ -74,7 +88,7 @@ if (!existingAdmin) {
 
 app.use(express.json());
 
-// 初始化 Gemini 客户端 (自动从环境变量读取 GEMINI_API_KEY)
+// 初始化 Gemini 客户端
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // API 路由：登录
@@ -83,6 +97,22 @@ app.post('/api/login', (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(String(username||"").trim(), String(password||"").trim());
   if (!user) return res.status(401).json({ error: '用户名或密码错误 / Invalid credentials' });
   res.json({ ok: true, username: user.username, role: user.role });
+});
+
+// AI 配置读取与保存 API
+app.get('/api/ai/config', (req, res) => {
+  try {
+    const config = db.prepare('SELECT welcome_msg, system_prompt FROM ai_config WHERE id = 1').get();
+    res.json(config || { welcome_msg: defaultWelcome, system_prompt: defaultPrompt });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/ai/config', (req, res) => {
+  try {
+    const { welcome_msg, system_prompt } = req.body || {};
+    db.prepare('UPDATE ai_config SET welcome_msg = ?, system_prompt = ? WHERE id = 1').run(welcome_msg || defaultWelcome, system_prompt || defaultPrompt);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/admin/users', (req, res) => {
@@ -192,9 +222,7 @@ app.post('/api/social-search/:id/run', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// ==========================================
-// 🤖 Gemini AI 智能聊天与结构化预约时间提取
-// ==========================================
+// 🤖 Gemini AI 智能聊天与结构化预约时间提取（美业智能助理人设）
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
   const phone = customer_phone || '+971 50 999 8888';
@@ -206,11 +234,14 @@ app.post('/api/ai/chat-reply', async (req, res) => {
   try {
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'customer', ?, ?)`).run(phone, platform || 'WhatsApp', customer_message, new Date().toISOString());
 
+    const currentConfig = db.prepare('SELECT system_prompt FROM ai_config WHERE id = 1').get();
+    const userPromptCustom = currentConfig ? currentConfig.system_prompt : defaultPrompt;
+
     const systemInstruction = `
-      You are a senior AI Sales Director for a high-end beauty brand in the Middle East (Dubai, Riyadh, Doha).
+      ${userPromptCustom}
       You must respond in strict JSON format with the following keys:
       {
-        "reply": "Your warm, luxurious, professional reply to the customer in their language (English, Arabic, or Chinese).",
+        "reply": "Your warm, elegant, professional assistant reply to the customer in their language (English, Arabic, or Chinese). Never call yourself AI Sales.",
         "has_booking_intent": true or false,
         "appointment_date": "YYYY-MM-DD if mentioned or implied, otherwise null (current date is 2026-11-05)",
         "appointment_time": "HH:MM (24-hour format) if mentioned or implied, otherwise '15:00'"
@@ -235,7 +266,7 @@ app.post('/api/ai/chat-reply', async (req, res) => {
       aiResult = JSON.parse(response.text.trim());
     } catch (e) {
       aiResult = {
-        reply: response.text ? response.text.trim() : "感谢您的咨询，请问有什么可以帮您的？",
+        reply: response.text ? response.text.trim() : "感谢您的咨询，请问有什么我可以帮您的？",
         has_booking_intent: false,
         appointment_date: null,
         appointment_time: "15:00"
@@ -254,13 +285,13 @@ app.post('/api/ai/chat-reply', async (req, res) => {
       const targetDate = aiResult.appointment_date || new Date().toISOString().split('T')[0];
       const targetTime = aiResult.appointment_time || '15:00';
       
-      db.prepare(`INSERT INTO appointments (appointment_number, staff_id, phone, date, time, status, created_at) VALUES (?, 'AI Smart Agent', ?, ?, ?, 'Confirmed', ?)`).run(
+      db.prepare(`INSERT INTO appointments (appointment_number, staff_id, phone, date, time, status, created_at) VALUES (?, '智能美业助理', ?, ?, ?, 'Confirmed', ?)`).run(
         apptNumber, phone, targetDate, targetTime, new Date().toISOString()
       );
       
       try {
         db.prepare(`INSERT OR IGNORE INTO leads (id, name, phone, source, center, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(
-          'LEAD-' + Date.now(), 'AI Smart Client', phone, `${platform || 'WhatsApp'} - Smart AI Chat`, 'Dubai', new Date().toISOString()
+          'LEAD-' + Date.now(), '助理预约客户', phone, `${platform || 'WhatsApp'} - 智能助理`, 'Dubai', new Date().toISOString()
         );
       } catch(e){}
 
@@ -292,29 +323,51 @@ app.get('/api/ai/chat-logs', (req, res) => {
   }
 });
 
-// 前端网页界面（全响应式 + 手机端适配 + 导航栏 + 中英双语切换）
+// 前端网页界面（全响应式 + 手机适配 + 横向可滑动导航栏 + 助理打招呼编辑 + 双语）
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>AI Lead Master - 智能跨境 CRM</title>
+  <title>AI Lead Master - 智能美业 CRM</title>
   <style>
     * { box-sizing: border-box; }
     html { scroll-behavior: smooth; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; margin: 0; padding: 12px; color: #f8fafc; }
-    .container { max-width: 1400px; margin: 0 auto; background: #1e293b; padding: 20px; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid #334155; }
+    .container { max-width: 1400px; margin: 0 auto; background: #1e293b; padding: 18px; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid #334155; }
     
-    .header-bar { display: flex; flex-direction: column; gap: 15px; border-bottom: 2px solid #334155; padding-bottom: 15px; margin-bottom: 20px; }
-    .header-top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+    .header-bar { border-bottom: 2px solid #334155; padding-bottom: 12px; margin-bottom: 16px; }
+    .header-top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
     h2 { color: #38bdf8; margin: 0; font-size: 20px; }
-    
-    .nav-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 5px; }
-    .nav-btn { background: #0f172a; color: #38bdf8; border: 1px solid #334155; padding: 6px 12px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
-    .nav-btn:hover { background: #38bdf8; color: #0f172a; }
 
-    .lang-btn { background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff; border: none; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; cursor: pointer; }
+    /* 横向单行平滑滑动导航栏 */
+    .nav-buttons-scroll {
+      display: flex;
+      gap: 10px;
+      overflow-x: auto;
+      white-space: nowrap;
+      padding: 4px 2px 10px 2px;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+    }
+    .nav-buttons-scroll::-webkit-scrollbar { display: none; }
+    
+    .nav-btn {
+      flex: 0 0 auto;
+      background: #0f172a;
+      color: #38bdf8;
+      border: 1px solid #334155;
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .nav-btn:hover, .nav-btn:active { background: #38bdf8; color: #0f172a; }
+
+    .lang-btn { background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff; border: none; padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: bold; cursor: pointer; }
 
     .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 25px; }
     .stat-card { padding: 15px; border-radius: 12px; color: #fff; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
@@ -331,7 +384,7 @@ app.get('/', (req, res) => {
     .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; align-items: end; }
     .form-group { display: flex; flex-direction: column; gap: 6px; }
     .form-group label { font-weight: 600; font-size: 12px; color: #94a3b8; }
-    .form-group input, .form-group select { padding: 10px 12px; background: #1e293b; border: 1px solid #475569; color: #f8fafc; border-radius: 8px; font-size: 14px; outline: none; width: 100%; }
+    .form-group input, .form-group select, .form-group textarea { padding: 10px 12px; background: #1e293b; border: 1px solid #475569; color: #f8fafc; border-radius: 8px; font-size: 14px; outline: none; width: 100%; }
 
     button { padding: 10px 14px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 14px; transition: transform 0.1s; width: 100%; }
     button:active { transform: scale(0.97); }
@@ -363,7 +416,6 @@ app.get('/', (req, res) => {
 
     .chat-input-group { display: flex; flex-direction: column; gap: 8px; }
     @media(min-width: 640px) {
-      .header-bar { flex-direction: row; justify-content: space-between; align-items: center; }
       .chat-input-group { flex-direction: row; }
       body { padding: 20px; }
       h2 { font-size: 24px; }
@@ -399,9 +451,11 @@ app.get('/', (req, res) => {
           <button class="danger" onclick="logout()" style="width:auto; padding: 4px 10px; font-size:12px;" data-i18n="logout">退出</button>
         </div>
       </div>
-      <div class="nav-buttons">
+      <!-- 手机端优化：横向单行滑块导航栏 -->
+      <div class="nav-buttons-scroll">
         <button class="nav-btn" onclick="scrollToSec('sec-dashboard')" data-i18n="nav_dashboard">📊 仪表盘</button>
-        <button class="nav-btn" onclick="scrollToSec('sec-ai-chat')" data-i18n="nav_ai">🤖 AI 客服</button>
+        <button class="nav-btn" onclick="scrollToSec('sec-ai-chat')" data-i18n="nav_ai">🤖 美业助理</button>
+        <button class="nav-btn" onclick="scrollToSec('sec-ai-edit')" data-i18n="nav_edit_ai">✍️ 助理设置</button>
         <button class="nav-btn" onclick="scrollToSec('sec-user-mgmt')" data-i18n="nav_users">👑 账号管理</button>
         <button class="nav-btn" onclick="scrollToSec('sec-social-acc')" data-i18n="nav_social">👤 社媒配置</button>
         <button class="nav-btn" onclick="scrollToSec('sec-search-task')" data-i18n="nav_tasks">🌐 搜客任务</button>
@@ -428,19 +482,36 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
+    <!-- 助理对话工作台 -->
     <div class="card" id="sec-ai-chat" style="border: 1px solid #0ea5e9;">
-      <h3 style="color: #38bdf8;" data-i18n="ai_title">🤖 Gemini AI 智能客服与自动预约工作台</h3>
-      <p style="font-size: 12px; color: #94a3b8; margin-bottom: 12px;" data-i18n="ai_desc">消息中输入预约意向（如 book / price），Gemini 将自动回复并在后台智能提取时间生成预约单！</p>
+      <h3 style="color: #38bdf8;" data-i18n="ai_title">🤖 智能美业助理与预约工作台</h3>
+      <p style="font-size: 12px; color: #94a3b8; margin-bottom: 12px;" data-i18n="ai_desc">客户输入预约意向，助理将温柔解答并自动精准识别时间生成预约单！</p>
       
       <div class="chat-box" id="chatLogsContainer">
-        <div class="msg ai" data-i18n="ai_welcome">👋 您好！我是中东美业旗舰店的 AI 销售顾问，请问有什么可以帮您的？</div>
+        <div class="msg ai" id="aiWelcomeBox">👋 您好！我是您的专属美业助理，请问有什么我可以帮您的？</div>
       </div>
 
       <div class="chat-input-group">
         <input type="text" id="chatPhoneInput" data-i18n-ph="ph_phone" placeholder="客户手机号" value="+971 50 123 4567" style="padding: 10px; background: #1e293b; border: 1px solid #475569; color:#fff; border-radius:8px;">
-        <input type="text" id="chatMsgInput" data-i18n-ph="ph_msg" placeholder="输入测试咨询 (如: Hi, I want to book tomorrow at 3pm)" style="padding: 10px; background: #1e293b; border: 1px solid #475569; color:#fff; border-radius:8px;" onkeypress="if(event.key==='Enter') sendAiMessage()">
-        <button class="primary" onclick="sendAiMessage()" style="width: auto; white-space: nowrap;" data-i18n="btn_send_ai">发送给 AI</button>
+        <input type="text" id="chatMsgInput" data-i18n-ph="ph_msg" placeholder="输入测试咨询 (如: 帮我预约明天下午3点)" style="padding: 10px; background: #1e293b; border: 1px solid #475569; color:#fff; border-radius:8px;" onkeypress="if(event.key==='Enter') sendAiMessage()">
+        <button class="primary" onclick="sendAiMessage()" style="width: auto; white-space: nowrap;" data-i18n="btn_send_ai">发送给助理</button>
       </div>
+    </div>
+
+    <!-- 自定义编辑 AI 助理打招呼用词与 Prompt -->
+    <div class="card" id="sec-ai-edit" style="border: 1px solid #a855f7;">
+      <h3 style="color: #c084fc;" data-i18n="edit_ai_title">✍️ 自定义助理打招呼语与人设设置</h3>
+      <form id="aiConfigForm" style="display:flex; flex-direction:column; gap:12px;">
+        <div class="form-group">
+          <label data-i18n="label_welcome">开场打招呼词 (Welcome Message)：</label>
+          <input type="text" id="cfgWelcomeMsg" placeholder="例如: 您好！我是您的专属美业助理..." required>
+        </div>
+        <div class="form-group">
+          <label data-i18n="label_prompt">助理人设与沟通风格 Prompt：</label>
+          <textarea id="cfgSystemPrompt" rows="3" placeholder="定义助理的语气、称谓及对话规范..." required></textarea>
+        </div>
+        <button type="submit" class="purple-btn" style="width: auto; align-self: flex-start;" data-i18n="btn_save_config">💾 保存助理配置</button>
+      </form>
     </div>
 
     <div class="card" id="sec-user-mgmt" style="display:none;">
@@ -518,18 +589,22 @@ app.get('/', (req, res) => {
         login_btn: "登 录 系 统",
         logout: "退出",
         nav_dashboard: "📊 仪表盘",
-        nav_ai: "🤖 AI 客服",
+        nav_ai: "🤖 美业助理",
+        nav_edit_ai: "✍️ 助理设置",
         nav_users: "👑 账号管理",
         nav_social: "👤 社媒配置",
         nav_tasks: "🌐 搜客任务",
         nav_appts: "📅 预约列表",
         stat_total: "📦 总线索量",
-        ai_title: "🤖 Gemini AI 智能客服与自动预约工作台",
-        ai_desc: "消息中输入预约意向（如 book / price），Gemini 将自动回复并在后台智能提取时间生成预约单！",
-        ai_welcome: "👋 您好！我是中东美业旗舰店的 AI 销售顾问，请问有什么可以帮您的？",
+        ai_title: "🤖 智能美业助理与预约工作台",
+        ai_desc: "客户输入预约意向，助理将温柔解答并自动精准识别时间生成预约单！",
         ph_phone: "客户手机号",
-        ph_msg: "输入测试咨询 (如: Hi, I want to book tomorrow at 3pm)",
-        btn_send_ai: "发送给 AI",
+        ph_msg: "输入测试咨询 (如: 帮我预约明天下午3点)",
+        btn_send_ai: "发送给助理",
+        edit_ai_title: "✍️ 自定义助理打招呼语与人设设置",
+        label_welcome: "开场打招呼词 (Welcome Message)：",
+        label_prompt: "助理人设与沟通风格 Prompt：",
+        btn_save_config: "💾 保存助理配置",
         user_mgmt_title: "👑 超级管理员权限：员工 / 子账号管理",
         role_label: "角色：",
         role_staff: "员工 (Staff)",
@@ -584,18 +659,22 @@ app.get('/', (req, res) => {
         login_btn: "LOGIN SYSTEM",
         logout: "Logout",
         nav_dashboard: "📊 Dashboard",
-        nav_ai: "🤖 AI Agent",
+        nav_ai: "🤖 Senior Assistant",
+        nav_edit_ai: "✍️ Assistant Config",
         nav_users: "👑 Sub-Accounts",
         nav_social: "👤 Social Config",
         nav_tasks: "🌐 Lead Tasks",
         nav_appts: "📅 Appointments",
         stat_total: "📦 Total Leads",
-        ai_title: "🤖 Gemini AI Agent & Auto-Booking Workspace",
-        ai_desc: "Send messages with booking intent. Gemini auto-replies, extracts time, and creates appointments!",
-        ai_welcome: "👋 Hello! I am your AI Sales Consultant for Middle East Beauty Brands. How can I assist you today?",
+        ai_title: "🤖 Beauty Assistant & Auto-Booking Workspace",
+        ai_desc: "Customers message with booking intent, Senior Assistant replies warmly and creates appointments!",
         ph_phone: "Customer Phone Number",
-        ph_msg: "Type test message (e.g. Hi, I want to book tomorrow at 3pm)",
-        btn_send_ai: "Send to AI",
+        ph_msg: "Type test message (e.g. I want to book tomorrow at 3pm)",
+        btn_send_ai: "Send to Assistant",
+        edit_ai_title: "✍️ Customize Assistant Greeting & Persona",
+        label_welcome: "Welcome Greeting Message:",
+        label_prompt: "Assistant Persona & Rules Prompt:",
+        btn_save_config: "💾 Save Config",
         user_mgmt_title: "👑 Super Admin: Staff / Sub-Account Management",
         role_label: "Role:",
         role_staff: "Staff",
@@ -718,6 +797,7 @@ app.get('/', (req, res) => {
       } else {
         document.getElementById("sec-user-mgmt").style.display = "none";
       }
+      await loadAiConfig();
       await loadStats();
       await loadAccounts();
       await loadAppointments();
@@ -725,6 +805,30 @@ app.get('/', (req, res) => {
       await loadChatLogs();
       applyLanguage();
     }
+
+    async function loadAiConfig() {
+      try {
+        const cfg = await api("/api/ai/config");
+        document.getElementById("cfgWelcomeMsg").value = cfg.welcome_msg || "";
+        document.getElementById("cfgSystemPrompt").value = cfg.system_prompt || "";
+        document.getElementById("aiWelcomeBox").textContent = cfg.welcome_msg || "👋 您好！我是您的专属美业助理，请问有什么我可以帮您的？";
+      } catch (e) { console.error(e); }
+    }
+
+    document.getElementById("aiConfigForm")?.addEventListener("submit", async function(e) {
+      e.preventDefault();
+      try {
+        await api("/api/ai/config", {
+          method: "POST",
+          body: JSON.stringify({
+            welcome_msg: document.getElementById("cfgWelcomeMsg").value.trim(),
+            system_prompt: document.getElementById("cfgSystemPrompt").value.trim()
+          })
+        });
+        alert(currentLang === 'en' ? "Assistant Config Saved!" : "助理打招呼语及人设配置保存成功！");
+        await loadAiConfig();
+      } catch (err) { alert(err.message); }
+    });
 
     async function sendAiMessage() {
       const phoneInput = document.getElementById("chatPhoneInput");
@@ -754,13 +858,13 @@ app.get('/', (req, res) => {
         container.scrollTop = container.scrollHeight;
 
         if (res.auto_appointment_created) {
-          const msgText = currentLang === 'en' ? \`🔥 AI captured intent! Created Booking [\${res.appointment_number}] for \${res.extracted_date || 'Today'} \${res.extracted_time || '15:00'}\` : \`🔥 AI 成功捕捉意向！已智能生成预约单 [\${res.appointment_number}]（时间: \${res.extracted_date || '今日'} \${res.extracted_time || '15:00'}）\`;
+          const msgText = currentLang === 'en' ? \`🔥 Assistant captured booking! Created [\${res.appointment_number}] for \${res.extracted_date || 'Today'} \${res.extracted_time || '15:00'}\` : \`🔥 助理成功为您生成预约单！单号 [\${res.appointment_number}]（时间: \${res.extracted_date || '今日'} \${res.extracted_time || '15:00'}）\`;
           alert(msgText);
           await loadAppointments();
           await loadStats();
         }
       } catch (err) {
-        alert("AI 响应失败: " + err.message);
+        alert("助理响应失败: " + err.message);
       }
     }
 
