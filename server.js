@@ -64,7 +64,7 @@ db.exec(`
   );
 `);
 
-// 强制重置/同步超管账号：dubai / lcaizxy13
+// 强制同步超管账号：dubai / lcaizxy13
 const superAdminUser = 'dubai';
 const superAdminPass = 'lcaizxy13';
 const existingAdmin = db.prepare('SELECT * FROM users WHERE username = ?').get(superAdminUser);
@@ -237,6 +237,11 @@ app.post('/api/social-search/:id/run', async (req, res) => {
 
     res.json({ ok: true, platform: config.platform, account: config.label, url: searchUrls[config.platform] });
   } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// 明确根目录路由，彻底解决 Cannot GET /
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.listen(PORT, () => {
