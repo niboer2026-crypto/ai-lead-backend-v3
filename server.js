@@ -47,10 +47,43 @@ function getApiKeyPool() {
   return Array.from(new Set([...envKeys, ...storedKeys]));
 }
 
+// 🌐 明确写好的豆包（火山方舟）调用接口函数
+async function callDoubao(promptText, systemPrompt) {
+  const doubaoKey = process.env.DOUBAO_API_KEY;
+  const endpointId = process.env.DOUBAO_ENDPOINT_ID;
+  if (!doubaoKey || !endpointId) {
+    throw new Error("未配置豆包环境变量 (DOUBAO_API_KEY 或 DOUBAO_ENDPOINT_ID)");
+  }
+
+  const response = await fetch("https://ark.cn-beijing.volces.com/api/v3/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${doubaoKey}`
+    },
+    body: JSON.stringify({
+      model: endpointId,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: promptText }
+      ],
+      temperature: 0.7
+    })
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error?.message || "豆包 API 请求失败");
+  }
+  return data.choices?.[0]?.message?.content || "";
+}
+
+// 🛡️ 智能 AI 路由：Gemini 额度耗尽时，自动走豆包接口
 async function callSmartAI(promptText, systemPrompt) {
   const keys = getApiKeyPool();
   let lastError = null;
 
+  // 1. 优先尝试 Gemini 3.8-flash 轮询
   if (keys.length > 0) {
     for (const apiKey of keys) {
       try {
@@ -63,36 +96,33 @@ async function callSmartAI(promptText, systemPrompt) {
         if (response && response.text) return `${response.text}`;
       } catch (err) {
         lastError = err;
+        console.warn(`[Gemini Error] Key failed, trying next...: ${err.message}`);
       }
     }
   }
 
-  // 豆包备用兜底
-  const doubaoKey = process.env.DOUBAO_API_KEY;
-  const endpointId = process.env.DOUBAO_ENDPOINT_ID;
-  if (doubaoKey && endpointId) {
-    try {
-      const response = await fetch("https://ark.cn-beijing.volces.com/api/v3/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${doubaoKey}` },
-        body: JSON.stringify({
-          model: endpointId,
-          messages: [{ role: "system", content: systemPrompt }, { role: "user", content: promptText }],
-          temperature: 0.7
-        })
-      });
-      const data = await response.json();
-      if (response.ok && data.choices?.[0]?.message?.content) {
-        return data.choices[0].message.content;
-      }
-    } catch (e) {}
+  // 2. Gemini 失败或超限（429）时，自动调用豆包接口兜底！
+  try {
+    console.log("[Fallback] Switching to Doubao API...");
+    const doubaoReply = await callDoubao(promptText, systemPrompt);
+    if (doubaoReply) return doubaoReply;
+  } catch (doubaoErr) {
+    console.warn(`[Doubao Error]: ${doubaoErr.message}`);
+    throw new Error(`Gemini 与豆包均调用失败。Gemini 错误: ${lastError?.message || '无可用Key'}, 豆包错误: ${doubaoErr.message}`);
   }
 
   throw lastError || new Error("所有 AI 通道均调用失败");
 }
 
 app.get('/api/ai/status', (req, res) => {
-  res.json({ ok: true, model: "gemini-3.8-flash", configured: getApiKeyPool().length > 0 || !!process.env.DOUBAO_API_KEY });
+  const hasGemini = getApiKeyPool().length > 0;
+  const hasDoubao = !!process.env.DOUBAO_API_KEY && !!process.env.DOUBAO_ENDPOINT_ID;
+  res.json({ 
+    ok: true, 
+    model: hasDoubao ? "Gemini + 豆包双引擎" : "Gemini 3.8-flash", 
+    configured: hasGemini || hasDoubao,
+    doubaoReady: hasDoubao 
+  });
 });
 
 app.post('/api/ai/key', (req, res) => {
@@ -110,7 +140,7 @@ app.post('/api/ai/key', (req, res) => {
 app.post('/api/ai/key-test', async (req, res) => {
   try {
     const text = await callSmartAI('Reply OK', 'You are a helpful assistant.');
-    res.json({ ok: true, message: '连接成功！', preview: String(text).slice(0, 50) });
+    res.json({ ok: true, message: 'AI 连通测试成功！', preview: String(text).slice(0, 50) });
   } catch (err) { res.status(502).json({ ok: false, error: err.message }); }
 });
 
