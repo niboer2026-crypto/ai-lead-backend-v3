@@ -1,9 +1,131 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const Database = require('better-sqlite3');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
+
+// ==================== 自动自愈机制：确保 public 目录和文件存在 ====================
+const publicDir = path.join(__dirname, 'public');
+if (!fs.existsSync(publicDir)) {
+  fs.mkdirSync(publicDir, { recursive: true });
+}
+
+const indexPath = path.join(publicDir, 'index.html');
+if (!fs.existsSync(indexPath)) {
+  const defaultHtml = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Lead Master - 智能 CRM 与社媒获客控制台</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f6f9; margin: 0; padding: 20px; color: #333; }
+    .container { max-width: 1200px; margin: 0 auto; background: #fff; padding: 25px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+    h2 { color: #1a73e8; border-bottom: 2px solid #e8eaed; padding-bottom: 12px; margin-top: 0; }
+    h3 { color: #3c4043; margin-top: 0; }
+    .card { background: #fafbfc; border: 1px solid #e1e4e8; border-radius: 8px; padding: 20px; margin-bottom: 24px; }
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; align-items: end; }
+    .form-group { display: flex; flex-direction: column; gap: 6px; }
+    .form-group label { font-weight: 600; font-size: 13px; color: #4a5568; }
+    .form-group input, .form-group select { padding: 9px 12px; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 14px; outline: none; }
+    button { padding: 9px 16px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 14px; transition: background 0.2s; }
+    button.primary { background: #3182ce; color: #fff; }
+    button.primary:hover { background: #2b6cb0; }
+    button.secondary { background: #718096; color: #fff; }
+    button.danger { background: #e53e3e; color: #fff; }
+    table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
+    th, td { border: 1px solid #e2e8f0; padding: 12px; text-align: left; }
+    th { background-color: #edf2f7; font-weight: 600; color: #2d3748; }
+    tr:nth-child(even) { background-color: #f8fafc; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>🚀 AI Lead Master - 智能 CRM 与社媒获客控制台 (Auto-Recovered)</h2>
+    <div class="card">
+      <h3>👤 绑定社媒平台账号</h3>
+      <form id="accountForm" class="form-grid">
+        <div class="form-group">
+          <label>所属平台：</label>
+          <select id="accPlatform" required>
+            <option value="Facebook">Facebook</option>
+            <option value="Instagram">Instagram</option>
+            <option value="TikTok">TikTok</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>账号备注 / 标签：</label>
+          <input type="text" id="accLabel" placeholder="例如: 迪拜美业主账号" required>
+        </div>
+        <div class="form-group">
+          <label>独立环境 Profile ID：</label>
+          <input type="text" id="accProfileId" placeholder="例如: prof_uae_001" required>
+        </div>
+        <button type="submit" class="primary">绑 定 账 号</button>
+      </form>
+    </div>
+    <div class="card">
+      <h3>🌐 多平台社交定向搜索任务</h3>
+      <form id="socialSearchForm" class="form-grid">
+        <div class="form-group">
+          <label>选择平台账号：</label>
+          <select id="ssAccount" required><option value="">请选择账号</option></select>
+        </div>
+        <div class="form-group">
+          <label>目标平台：</label>
+          <input type="text" id="ssPlatform" readonly placeholder="自动匹配" style="background: #edf2f7;">
+        </div>
+        <div class="form-group">
+          <label>目标国家 (Country)：</label>
+          <input type="text" id="ssCountry" placeholder="例如: UAE">
+        </div>
+        <div class="form-group">
+          <label>目标城市 (City)：</label>
+          <input type="text" id="ssCity" placeholder="例如: Dubai">
+        </div>
+        <div class="form-group">
+          <label>搜索关键词：</label>
+          <input type="text" id="ssKeywords" placeholder="例如: Salon & Spa" required>
+        </div>
+        <div class="form-group">
+          <label>性别筛选：</label>
+          <select id="ssGender">
+            <option value="不限">不限</option>
+            <option value="男性">男性</option>
+            <option value="女性">女性</option>
+          </select>
+        </div>
+        <div style="grid-column: 1 / -1; margin-top: 10px;">
+          <button type="submit" class="primary" style="width: 100%; padding: 12px;">保 存 并 创 建 搜 索 任 务</button>
+        </div>
+      </form>
+      <h3 style="margin-top: 30px;">当前社媒定向搜索任务</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>平台</th>
+            <th>账号 ID</th>
+            <th>国家</th>
+            <th>城市</th>
+            <th>关键词</th>
+            <th>性别</th>
+            <th>状态</th>
+            <th>操作选项</th>
+          </tr>
+        </thead>
+        <tbody id="socialSearchList"></tbody>
+      </table>
+    </div>
+  </div>
+  <script src="/social-search.js"></script>
+</body>
+</html>`;
+  fs.writeFileSync(indexPath, defaultHtml, 'utf8');
+}
+// ==============================================================================
 
 // 初始化 SQLite 数据库
 const db = new Database('data.db');
@@ -29,73 +151,18 @@ db.exec(`
     enabled INTEGER DEFAULT 1,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
-
-  CREATE TABLE IF NOT EXISTS leads (
-    id TEXT PRIMARY KEY,
-    name TEXT,
-    phone TEXT,
-    source TEXT,
-    center TEXT,
-    created_at TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS api_cost_logs (
-    id TEXT PRIMARY KEY,
-    service TEXT,
-    endpoint TEXT,
-    units INTEGER,
-    cost_usd REAL,
-    timestamp TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS appointments (
-    appointment_number TEXT PRIMARY KEY,
-    staff_id TEXT,
-    date TEXT,
-    time TEXT,
-    status TEXT,
-    created_at TEXT
-  );
 `);
 
-// 内存中模拟运行中的独立浏览器实例映射表 (profile_id -> { page, browser })
 const runningAccounts = new Map();
 
-// 中间件配置
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(publicDir));
 
-// 辅助函数：API 成本日志记录
-function logApiUsage(service, endpoint, units, costUSD) {
-  const id = 'LOG-' + Date.now() + '-' + Math.floor(Math.random() * 1000);
-  const timestamp = new Date().toISOString();
-  try {
-    db.prepare(`
-      INSERT INTO api_cost_logs (id, service, endpoint, units, cost_usd, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, service, endpoint, units, costUSD, timestamp);
-  } catch (e) {
-    console.error('Log cost error:', e);
-  }
-}
-
-// 1. 系统健康检查
+// API 路由
 app.get('/api/health', (req, res) => {
   res.json({ msg: 'AI Lead Master Backend is active', ok: true });
 });
 
-// 2. 获取 API 成本统计
-app.get('/api/admin/api-costs', (req, res) => {
-  try {
-    const logs = db.prepare('SELECT * FROM api_cost_logs ORDER BY timestamp DESC LIMIT 50').all();
-    const total = db.prepare('SELECT SUM(cost_usd) as total FROM api_cost_logs').get();
-    res.json({ ok: true, totalCostUSD: total?.total || 0, logs });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 3. 获取与保存社交账号列表
 app.get('/api/social-accounts', (req, res) => {
   try {
     const accounts = db.prepare('SELECT * FROM social_accounts ORDER BY id DESC').all();
@@ -120,59 +187,6 @@ app.post('/api/social-accounts', (req, res) => {
   }
 });
 
-// 4. CRM 客户线索管理与查重
-app.post('/api/leads/add', (req, res) => {
-  try {
-    const lead = req.body || {};
-    const phone = lead.phone || '';
-    const center = lead.center || 'B2C';
-
-    const existing = db.prepare('SELECT * FROM leads WHERE phone = ? AND center = ?').get(phone, center);
-    if (existing) {
-      return res.status(409).json({ ok: false, error: '检测到重复线索（手机号已存在）' });
-    }
-
-    const id = 'LEAD-' + Date.now();
-    const createdAt = new Date().toISOString();
-    db.prepare(`
-      INSERT INTO leads (id, name, phone, source, center, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, lead.name || '未知客户', phone, lead.source || '手动录入', center, createdAt);
-
-    logApiUsage('CRM Deduplication', '/api/leads/add', 1, 0.0001);
-    res.json({ ok: true, msg: '线索保存成功', data: { id, ...lead, createdAt } });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 5. 社媒平台 Webhook 监听端点
-const handleWebhook = (sourceName, payload, res) => {
-  try {
-    const name = payload.name || `${sourceName} 用户`;
-    const phone = payload.phone || 'Unknown';
-
-    if (phone !== 'Unknown') {
-      const existing = db.prepare('SELECT * FROM leads WHERE phone = ?').get(phone);
-      if (!existing) {
-        db.prepare(`
-          INSERT INTO leads (id, name, phone, source, center, created_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run('LEAD-' + Date.now(), name, phone, sourceName, 'B2C', new Date().toISOString());
-      }
-    }
-    logApiUsage(sourceName + ' Webhook', '/api/webhooks/' + sourceName.toLowerCase(), 1, 0.0);
-    res.json({ received: true });
-  } catch (e) {
-    res.status(400).json({ error: 'Webhook 解析错误' });
-  }
-};
-
-app.post('/api/webhooks/facebook', (req, res) => handleWebhook('Facebook Ads', req.body, res));
-app.post('/api/webhooks/tiktok', (req, res) => handleWebhook('TikTok Ads', req.body, res));
-app.post('/api/webhooks/instagram', (req, res) => handleWebhook('Instagram Direct', req.body, res));
-
-// 6. 社交平台定向搜索 API 路由
 const clean = (v, max = 200) => String(v ?? "").trim().slice(0, max);
 const validPlatforms = ["Facebook", "Instagram", "TikTok"];
 const validGenders = ["不限", "男性", "女性"];
@@ -201,16 +215,12 @@ app.post('/api/social-search', (req, res) => {
   if (!keywords) {
     return res.status(400).json({ error: "请填写搜索关键词" });
   }
-  if (!validGenders.includes(gender)) {
-    return res.status(400).json({ error: "性别设置无效" });
-  }
 
   try {
     const result = db.prepare(`
       INSERT INTO social_search_configs (account_id, platform, country, city, keywords, gender)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(accountId, platform, country, city, keywords, gender);
-
     res.json({ ok: true, id: result.lastInsertRowid });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -245,12 +255,8 @@ app.post('/api/social-search/:id/run', async (req, res) => {
       WHERE s.id = ?
     `).get(Number(req.params.id));
 
-    if (!config) {
-      return res.status(404).json({ error: "搜索任务不存在" });
-    }
-    if (!config.enabled) {
-      return res.status(400).json({ error: "该搜索任务已停用" });
-    }
+    if (!config) return res.status(404).json({ error: "搜索任务不存在" });
+    if (!config.enabled) return res.status(400).json({ error: "该搜索任务已停用" });
 
     const accountInstance = runningAccounts.get(config.profile_id);
     if (!accountInstance || !accountInstance.page) {
@@ -259,7 +265,6 @@ app.post('/api/social-search/:id/run', async (req, res) => {
 
     const query = [config.keywords, config.city, config.country].filter(Boolean).join(" ");
     const encoded = encodeURIComponent(query);
-
     const searchUrls = {
       Facebook: `https://www.facebook.com/search/top?q=${encoded}`,
       Instagram: `https://www.instagram.com/explore/search/keyword/?q=${encoded}`,
@@ -267,35 +272,17 @@ app.post('/api/social-search/:id/run', async (req, res) => {
     };
 
     const url = searchUrls[config.platform];
-    if (!url) {
-      return res.status(400).json({ error: "不支持的平台类型" });
-    }
+    await accountInstance.page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-    await accountInstance.page.goto(url, {
-      waitUntil: "domcontentloaded",
-      timeout: 60000
-    });
-
-    res.json({
-      ok: true,
-      platform: config.platform,
-      account: config.label,
-      country: config.country,
-      city: config.city,
-      keywords: config.keywords,
-      gender: config.gender,
-      url,
-      notice: "已在独立浏览器中成功打开搜索页面"
-    });
-
+    res.json({ ok: true, platform: config.platform, account: config.label, url });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 默认根路由
+// 根路由兜底
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(indexPath);
 });
 
 app.listen(PORT, () => {
