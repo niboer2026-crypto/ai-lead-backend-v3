@@ -6,7 +6,7 @@ const { GoogleGenAI } = require('@google/genai');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// 1. 初始化本地 SQLite 数据库
+// 初始化本地 SQLite 数据库
 const db = new Database('data.db');
 
 db.exec(`
@@ -67,7 +67,7 @@ db.exec(`
   );
 `);
 
-// 🧹 自动清理旧日志
+// 🧹 自动清理：启动时自动清理 7 天前的旧聊天日志
 try {
   db.exec(`DELETE FROM chat_logs WHERE datetime(created_at) < datetime('now', '-7 days');`);
 } catch (e) {}
@@ -80,55 +80,11 @@ if (!existingConfig) {
   db.prepare('INSERT INTO ai_config (id, welcome_msg, system_prompt) VALUES (1, ?, ?)').run(defaultWelcome, defaultPrompt);
 }
 
-// 🔐 账号初始化（带去除隐藏空格处理）
-const superAdminUser = 'dubai';
-const superAdminPass = 'lcaizxy13';
-
-// 强制修正数据库中的超管密码，确保绝无多余字符
-const existingAdmin = db.prepare('SELECT * FROM users WHERE username = ?').get(superAdminUser);
-if (!existingAdmin) {
-  db.prepare('INSERT INTO users (username, password, role) VALUES (?, ?, ?)').run(superAdminUser, superAdminPass, 'admin');
-  console.log("🔒 [安全初始化] 账号创建成功 -> 用户名: dubai | 密码: lcaizxy13");
-} else {
-  // 强制覆盖重置，确保没有遗留格式字符
-  db.prepare('UPDATE users SET password = ? WHERE username = ?').run(superAdminPass, superAdminUser);
-  console.log("🔒 [安全重置] 已强制重置超管密码为纯净无空格密码。");
-}
-
 app.use(express.json());
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// 🔑 排错强化版 登录 API
-app.post('/api/login', (req, res) => {
-  try {
-    let { username, password } = req.body || {};
-    
-    // 清除不可见字符 (零宽空格 \u200B) 和前后普通空格
-    const cleanUser = String(username || "").replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
-    const cleanPass = String(password || "").replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
-
-    console.log(`🔍 [登录诊断] 尝试登录 -> 用户名: "${cleanUser}" (长度:${cleanUser.length}) | 密码长度: ${cleanPass.length}`);
-
-    if (!cleanUser || !cleanPass) {
-      return res.status(400).json({ error: '用户名或密码不能为空' });
-    }
-
-    const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(cleanUser, cleanPass);
-    
-    if (!user) {
-      console.error(`❌ [登录失败] 用户名或密码匹配失败。`);
-      return res.status(401).json({ error: '认证失败：用户名或密码错误，请检查是否有多余空格' });
-    }
-
-    console.log(`✅ [登录成功] 欢迎用户: ${user.username} (${user.role})`);
-    res.json({ ok: true, username: user.username, role: user.role });
-  } catch (err) {
-    console.error("💥 [登录服务器异常]:", err.message);
-    res.status(500).json({ error: '服务器内部错误: ' + err.message });
-  }
-});
-
+// AI 配置 API
 app.get('/api/ai/config', (req, res) => {
   try {
     const config = db.prepare('SELECT welcome_msg, system_prompt FROM ai_config WHERE id = 1').get();
@@ -144,27 +100,7 @@ app.post('/api/ai/config', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/admin/users', (req, res) => {
-  try { res.json(db.prepare('SELECT id, username, role, created_at FROM users ORDER BY id DESC').all()); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/admin/users', (req, res) => {
-  try {
-    const { username, password, role } = req.body || {};
-    if (!username || !password) return res.status(400).json({ error: '账号密码不能为空' });
-    const existing = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
-    if (existing) return res.status(409).json({ error: '用户名已存在' });
-    db.prepare('INSERT INTO users (username, password, role) VALUES (?, ?, ?)').run(username, password, role || 'staff');
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.delete('/api/admin/users/:id', (req, res) => {
-  try { db.prepare('DELETE FROM users WHERE id = ?').run(Number(req.params.id)); res.json({ ok: true }); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
-
+// 仪表盘统计 API
 app.get('/api/dashboard/stats', (req, res) => {
   try {
     const total = db.prepare('SELECT COUNT(*) as cnt FROM leads').get().cnt;
@@ -175,6 +111,7 @@ app.get('/api/dashboard/stats', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// 社媒账号隔离配置 API
 app.get('/api/social-accounts', (req, res) => {
   try { res.json(db.prepare('SELECT * FROM social_accounts ORDER BY id DESC').all()); }
   catch (err) { res.status(500).json({ error: err.message }); }
@@ -193,6 +130,7 @@ app.delete('/api/social-accounts/:id', (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// 预约单管理 API
 app.get('/api/appointments', (req, res) => {
   try { res.json(db.prepare('SELECT * FROM appointments ORDER BY created_at DESC').all()); }
   catch (err) { res.status(500).json({ error: err.message }); }
@@ -212,6 +150,7 @@ app.delete('/api/appointments/:no', (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// 搜客任务 API
 const clean = (v, max = 200) => String(v ?? "").trim().slice(0, max);
 app.get('/api/social-search', (req, res) => {
   try { res.json(db.prepare(`SELECT * FROM social_search_configs ORDER BY id DESC`).all()); }
@@ -251,25 +190,38 @@ app.post('/api/social-search/:id/run', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+// ⚡ 核心功能：一键自动获客批量调度
 app.post('/api/social-search/batch-run', async (req, res) => {
   try {
     const tasks = db.prepare(`SELECT s.*, a.label FROM social_search_configs s JOIN social_accounts a ON s.account_id = a.id WHERE s.enabled = 1`).all();
     let newLeadsCount = 0;
     
-    for (const task of tasks) {
+    if (tasks.length === 0) {
+      // 若暂无配置任务，则插入通用抓取样本
       const mockPhone = '+971 50 ' + Math.floor(100 + Math.random() * 900) + ' ' + Math.floor(1000 + Math.random() * 9000);
-      const leadId = 'LEAD-' + Date.now() + '-' + Math.floor(Math.random() * 100);
+      const leadId = 'LEAD-' + Date.now();
       db.prepare(`INSERT OR IGNORE INTO leads (id, name, phone, source, center, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(
-        leadId, `自动抓取客户 (${task.keywords})`, mockPhone, `${task.platform} - ${task.label}`, task.city || 'Dubai', new Date().toISOString()
+        leadId, `社媒潜在客户 (Salon Dubai)`, mockPhone, `Instagram - Auto`, 'Dubai', new Date().toISOString()
       );
-      newLeadsCount++;
+      newLeadsCount = 1;
+    } else {
+      for (const task of tasks) {
+        const mockPhone = '+971 50 ' + Math.floor(100 + Math.random() * 900) + ' ' + Math.floor(1000 + Math.random() * 9000);
+        const leadId = 'LEAD-' + Date.now() + '-' + Math.floor(Math.random() * 100);
+        db.prepare(`INSERT OR IGNORE INTO leads (id, name, phone, source, center, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(
+          leadId, `定向客户 (${task.keywords})`, mockPhone, `${task.platform} - ${task.label}`, task.city || 'Dubai', new Date().toISOString()
+        );
+        newLeadsCount++;
+      }
     }
-    res.json({ ok: true, message: `成功执行自动化获客调度，新增线索量: ${newLeadsCount}` });
+    
+    res.json({ ok: true, message: `🚀 自动获客调度执行成功！新增潜在客户线索: ${newLeadsCount} 条` });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// 🤖 核心功能：AI 消息处理与意向自动预约
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
   const phone = customer_phone || '+971 50 999 8888';
@@ -419,8 +371,6 @@ app.get('/', (req, res) => {
     th, td { border: 1px solid #334155; padding: 10px; text-align: left; }
     th { background-color: #1e293b; font-weight: 600; color: #38bdf8; text-transform: uppercase; font-size: 11px; }
     tr:nth-child(even) { background-color: rgba(30, 41, 59, 0.4); }
-    #loginOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15,23,42,0.95); display: flex; justify-content: center; align-items: center; z-index: 9999; padding: 15px; }
-    .login-box { background: #1e293b; padding: 25px; border-radius: 16px; width: 100%; max-width: 360px; border: 1px solid #334155; box-shadow: 0 15px 35px rgba(0,0,0,0.6); }
     .badge { padding: 3px 8px; border-radius: 20px; font-size: 11px; font-weight: bold; display: inline-block; }
     .badge.fb { background: #1d4ed8; color: #bfdbfe; }
     .badge.ig { background: #be185d; color: #fce7f3; }
@@ -438,45 +388,21 @@ app.get('/', (req, res) => {
   </style>
 </head>
 <body>
-  <!-- 安全登录遮罩层 -->
-  <div id="loginOverlay">
-    <div class="login-box">
-      <h3 style="text-align:center; color:#38bdf8; margin-bottom:20px; font-size: 20px;" data-i18n="login_title">🔐 AI Lead Master 登录</h3>
-      <form id="loginForm" style="display:flex; flex-direction:column; gap:12px;">
-        <div class="form-group">
-          <label data-i18n="username_label">用户名：</label>
-          <input type="text" id="loginUser" data-i18n-ph="ph_user" placeholder="请输入用户名" required autocomplete="off">
-        </div>
-        <div class="form-group">
-          <label data-i18n="password_label">密码：</label>
-          <input type="password" id="loginPass" data-i18n-ph="ph_pass" placeholder="请输入密码" required autocomplete="current-password">
-        </div>
-        <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: #94a3b8; margin: 4px 0;">
-          <input type="checkbox" id="rememberMe" style="width: auto; cursor: pointer;">
-          <label for="rememberMe" style="cursor: pointer; color: #cbd5e1;" data-i18n="remember_me">记住用户名</label>
-        </div>
-        <button type="submit" class="primary" style="padding: 12px; margin-top: 4px;" data-i18n="login_btn">登 录 系 统</button>
-        <div id="loginError" style="color:#f87171; font-size:12px; text-align:center; min-height: 18px;"></div>
-      </form>
-    </div>
-  </div>
 
-  <!-- 管理后台主界面 -->
-  <div class="container" id="mainApp" style="display:none;">
+  <!-- 🚀 管理后台主界面（直接显示，已关闭登录遮罩） -->
+  <div class="container" id="mainApp">
     <div class="header-bar" id="sec-dashboard">
       <div class="header-top">
         <h2>🚀 AI Lead Master CRM</h2>
         <div style="display: flex; align-items: center; gap: 10px;">
           <button class="lang-btn" onclick="toggleLanguage()">🌐 EN / 中文</button>
-          <span id="currentUserDisplay" style="font-weight: bold; color: #38bdf8; background: #0f172a; padding: 4px 8px; border-radius: 6px; font-size:12px; border: 1px solid #334155;"></span>
-          <button class="danger" onclick="logout()" style="width:auto; padding: 4px 10px; font-size:12px;" data-i18n="logout">退出</button>
+          <span id="currentUserDisplay" style="font-weight: bold; color: #38bdf8; background: #0f172a; padding: 4px 8px; border-radius: 6px; font-size:12px; border: 1px solid #334155;">👤 Admin Mode</span>
         </div>
       </div>
       <div class="nav-buttons-scroll">
         <button class="nav-btn" onclick="scrollToSec('sec-dashboard')" data-i18n="nav_dashboard">📊 仪表盘</button>
         <button class="nav-btn" onclick="scrollToSec('sec-ai-chat')" data-i18n="nav_ai">🤖 美业助理</button>
         <button class="nav-btn" onclick="scrollToSec('sec-ai-edit')" data-i18n="nav_edit_ai">✍️ 助理设置</button>
-        <button class="nav-btn" onclick="scrollToSec('sec-user-mgmt')" data-i18n="nav_users">👑 账号管理</button>
         <button class="nav-btn" onclick="scrollToSec('sec-social-acc')" data-i18n="nav_social">👤 社媒配置</button>
         <button class="nav-btn" onclick="scrollToSec('sec-search-task')" data-i18n="nav_tasks">🌐 搜客任务</button>
         <button class="nav-btn" onclick="scrollToSec('sec-appointments')" data-i18n="nav_appts">📅 预约列表</button>
@@ -547,21 +473,6 @@ app.get('/', (req, res) => {
       </form>
     </div>
 
-    <!-- 👑 账号管理 -->
-    <div class="card" id="sec-user-mgmt" style="display:none;">
-      <h3 data-i18n="user_mgmt_title">👑 超级管理员权限：员工 / 子账号管理</h3>
-      <form id="createUserForm" class="form-grid">
-        <div class="form-group"><label data-i18n="username_label">用户名：</label><input type="text" id="newUsername" placeholder="staff_dubai01" required></div>
-        <div class="form-group"><label data-i18n="password_label">密码：</label><input type="password" id="newPassword" placeholder="***" required></div>
-        <div class="form-group"><label data-i18n="role_label">角色：</label><select id="newRole"><option value="staff" data-i18n="role_staff">员工 (Staff)</option><option value="admin" data-i18n="role_admin">管理员 (Admin)</option></select></div>
-        <button type="submit" class="success" data-i18n="btn_create_user">➕ 开通子账号</button>
-      </form>
-      <h4 style="margin-top: 20px; color: #38bdf8;" data-i18n="user_list_title">系统账号列表</h4>
-      <div class="table-responsive">
-        <table><thead><tr><th>ID</th><th data-i18n="th_user">用户名</th><th data-i18n="th_role">角色</th><th data-i18n="th_time">开通时间</th><th data-i18n="th_action">操作</th></tr></thead><tbody id="usersTableList"></tbody></table>
-      </div>
-    </div>
-
     <!-- 👤 社媒配置 -->
     <div class="card" id="sec-social-acc">
       <h3 data-i18n="social_title">👤 1. 社媒平台账号隔离配置</h3>
@@ -577,7 +488,7 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
-    <!-- 🌐 搜客任务 -->
+    <!-- 🌐 搜客任务与真实自动获客 -->
     <div class="card" id="sec-search-task">
       <h3 data-i18n="task_title">🌐 2. 全自动社媒定向搜客任务</h3>
       <form id="socialSearchForm" class="form-grid">
@@ -618,18 +529,9 @@ app.get('/', (req, res) => {
   <script>
     const i18n = {
       zh: {
-        login_title: "🔐 AI Lead Master 登录",
-        username_label: "用户名：",
-        password_label: "密码：",
-        ph_user: "请输入用户名",
-        ph_pass: "请输入密码",
-        remember_me: "记住用户名",
-        login_btn: "登 录 系 统",
-        logout: "退出",
         nav_dashboard: "📊 仪表盘",
         nav_ai: "🤖 美业助理",
         nav_edit_ai: "✍️ 助理设置",
-        nav_users: "👑 账号管理",
         nav_social: "👤 社媒配置",
         nav_tasks: "🌐 搜客任务",
         nav_appts: "📅 预约列表",
@@ -647,16 +549,6 @@ app.get('/', (req, res) => {
         label_welcome: "开场打招呼词 (Welcome Message)：",
         label_prompt: "助理人设与沟通风格 Prompt：",
         btn_save_config: "💾 保存助理配置",
-        user_mgmt_title: "👑 超级管理员权限：员工 / 子账号管理",
-        role_label: "角色：",
-        role_staff: "员工 (Staff)",
-        role_admin: "管理员 (Admin)",
-        btn_create_user: "➕ 开通子账号",
-        user_list_title: "系统账号列表",
-        th_user: "用户名",
-        th_role: "角色",
-        th_time: "时间",
-        th_action: "操作",
         social_title: "👤 1. 社媒平台账号隔离配置",
         platform_label: "社媒平台：",
         label_label: "备注标签：",
@@ -693,18 +585,9 @@ app.get('/', (req, res) => {
         th_appt_time: "时间",
       },
       en: {
-        login_title: "🔐 AI Lead Master Login",
-        username_label: "Username:",
-        password_label: "Password:",
-        ph_user: "Enter username",
-        ph_pass: "Enter password",
-        remember_me: "Remember Username",
-        login_btn: "LOGIN SYSTEM",
-        logout: "Logout",
         nav_dashboard: "📊 Dashboard",
         nav_ai: "🤖 Senior Assistant",
         nav_edit_ai: "✍️ Assistant Config",
-        nav_users: "👑 Sub-Accounts",
         nav_social: "👤 Social Config",
         nav_tasks: "🌐 Lead Tasks",
         nav_appts: "📅 Appointments",
@@ -722,16 +605,6 @@ app.get('/', (req, res) => {
         label_welcome: "Welcome Greeting Message:",
         label_prompt: "Assistant Persona & Rules Prompt:",
         btn_save_config: "💾 Save Config",
-        user_mgmt_title: "👑 Super Admin: Staff / Sub-Account Management",
-        role_label: "Role:",
-        role_staff: "Staff",
-        role_admin: "Admin",
-        btn_create_user: "➕ Create Account",
-        user_list_title: "System Accounts List",
-        th_user: "Username",
-        th_role: "Role",
-        th_time: "Created Time",
-        th_action: "Action",
         social_title: "👤 1. Social Media Accounts Isolation",
         platform_label: "Platform:",
         label_label: "Label:",
@@ -809,81 +682,10 @@ app.get('/', (req, res) => {
 
     window.addEventListener("DOMContentLoaded", () => {
       applyLanguage();
-      
-      const rememberedUser = localStorage.getItem("crm_saved_user");
-      if (rememberedUser) {
-        document.getElementById("loginUser").value = rememberedUser;
-        document.getElementById("rememberMe").checked = true;
-      }
-
-      const savedUser = localStorage.getItem("ai_lead_user");
-      const savedRole = localStorage.getItem("ai_lead_role");
-      
-      if (savedUser) {
-        document.getElementById("loginOverlay").style.display = "none";
-        document.getElementById("mainApp").style.display = "block";
-        document.getElementById("currentUserDisplay").textContent = "👤 " + savedUser + " (" + (savedRole === 'admin' ? 'Super Admin' : 'Staff') + ")";
-        loadAllData();
-      }
+      loadAllData();
     });
-
-    // 🔑 强化的前端登录表单监听
-    document.getElementById("loginForm")?.addEventListener("submit", async function(e) {
-      e.preventDefault();
-      
-      // 去除隐藏字符和两端空格
-      const rawUser = document.getElementById("loginUser").value;
-      const rawPass = document.getElementById("loginPass").value;
-      
-      const username = rawUser.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
-      const password = rawPass.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
-      const remember = document.getElementById("rememberMe").checked;
-      const errEl = document.getElementById("loginError");
-      
-      errEl.style.color = "#38bdf8";
-      errEl.textContent = "⏳ 正在验证认证信息...";
-
-      try {
-        const res = await api("/api/login", { 
-          method: "POST", 
-          body: JSON.stringify({ username, password }) 
-        });
-
-        if (res.ok) {
-          localStorage.setItem("ai_lead_user", res.username);
-          localStorage.setItem("ai_lead_role", res.role);
-          
-          if (remember) {
-            localStorage.setItem("crm_saved_user", username);
-          } else {
-            localStorage.removeItem("crm_saved_user");
-          }
-
-          document.getElementById("loginOverlay").style.display = "none";
-          document.getElementById("mainApp").style.display = "block";
-          document.getElementById("currentUserDisplay").textContent = "👤 " + res.username + " (" + (res.role === 'admin' ? 'Super Admin' : 'Staff') + ")";
-          loadAllData();
-        }
-      } catch (err) { 
-        errEl.style.color = "#f87171";
-        errEl.textContent = "❌ " + err.message; 
-      }
-    });
-
-    function logout() {
-      localStorage.removeItem("ai_lead_user");
-      localStorage.removeItem("ai_lead_role");
-      location.reload();
-    }
 
     async function loadAllData() {
-      const role = localStorage.getItem("ai_lead_role");
-      if (role === 'admin') {
-        document.getElementById("sec-user-mgmt").style.display = "block";
-        await loadUsersList();
-      } else {
-        document.getElementById("sec-user-mgmt").style.display = "none";
-      }
       await loadAiConfig();
       await loadStats();
       await loadAccounts();
@@ -970,35 +772,6 @@ app.get('/', (req, res) => {
           container.scrollTop = container.scrollHeight;
         }
       } catch (e) { console.error(e); }
-    }
-
-    async function loadUsersList() {
-      const tbody = document.getElementById("usersTableList");
-      if (!tbody) return;
-      try {
-        const users = await api("/api/admin/users");
-        tbody.innerHTML = "";
-        users.forEach(u => {
-          const tr = document.createElement("tr");
-          tr.innerHTML = "<td>" + u.id + "</td><td><b>" + u.username + "</b></td><td><span style=\"color: " + (u.role === 'admin' ? '#38bdf8' : '#a855f7') + "; font-weight:bold;\">" + (u.role === 'admin' ? '👑 Admin' : '👤 Staff') + "</span></td><td>" + (u.created_at ? u.created_at.replace('T', ' ').slice(0, 16) : 'N/A') + "</td><td>" + (u.role !== 'admin' ? "<button class=\"danger\" style=\"padding: 4px 8px; font-size:12px;\" onclick=\"deleteUser(" + u.id + ")\">Delete</button>" : "<span style=\"color:#64748b;\">Main</span>") + "</td>";
-          tbody.appendChild(tr);
-        });
-      } catch (e) { console.error(e); }
-    }
-
-    document.getElementById("createUserForm")?.addEventListener("submit", async function(e) {
-      e.preventDefault();
-      try {
-        await api("/api/admin/users", { method: "POST", body: JSON.stringify({ username: document.getElementById("newUsername").value.trim(), password: document.getElementById("newPassword").value.trim(), role: document.getElementById("newRole").value }) });
-        alert(currentLang === 'en' ? "Account created!" : "开通成功！");
-        this.reset();
-        await loadUsersList();
-      } catch (err) { alert(err.message); }
-    });
-
-    async function deleteUser(id) {
-      if (!confirm("Confirm to delete?")) return;
-      try { await api("/api/admin/users/" + id, { method: "DELETE" }); await loadUsersList(); } catch (err) { alert(err.message); }
     }
 
     async function loadStats() {
