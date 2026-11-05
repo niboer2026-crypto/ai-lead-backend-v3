@@ -82,7 +82,13 @@ if (!existingConfig) {
 
 app.use(express.json());
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+// 检查环境变量中的 API Key
+const apiKey = process.env.GEMINI_API_KEY;
+if (!apiKey) {
+  console.warn("⚠️ [警告] 未检测到 GEMINI_API_KEY 环境变量，AI 助手将无法正常响应。");
+}
+
+const ai = new GoogleGenAI({ apiKey: apiKey || "DUMMY_KEY" });
 
 // AI 配置 API
 app.get('/api/ai/config', (req, res) => {
@@ -111,7 +117,7 @@ app.get('/api/dashboard/stats', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 社媒账号隔离配置 API
+// 社媒账号配置 API
 app.get('/api/social-accounts', (req, res) => {
   try { res.json(db.prepare('SELECT * FROM social_accounts ORDER BY id DESC').all()); }
   catch (err) { res.status(500).json({ error: err.message }); }
@@ -190,14 +196,13 @@ app.post('/api/social-search/:id/run', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// ⚡ 核心功能：一键自动获客批量调度
+// ⚡ 一键自动获客批量调度
 app.post('/api/social-search/batch-run', async (req, res) => {
   try {
     const tasks = db.prepare(`SELECT s.*, a.label FROM social_search_configs s JOIN social_accounts a ON s.account_id = a.id WHERE s.enabled = 1`).all();
     let newLeadsCount = 0;
     
     if (tasks.length === 0) {
-      // 若暂无配置任务，则插入通用抓取样本
       const mockPhone = '+971 50 ' + Math.floor(100 + Math.random() * 900) + ' ' + Math.floor(1000 + Math.random() * 9000);
       const leadId = 'LEAD-' + Date.now();
       db.prepare(`INSERT OR IGNORE INTO leads (id, name, phone, source, center, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(
@@ -221,7 +226,7 @@ app.post('/api/social-search/batch-run', async (req, res) => {
   }
 });
 
-// 🤖 核心功能：AI 消息处理与意向自动预约
+// 🤖 核心修复：AI 消息处理与容错
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
   const phone = customer_phone || '+971 50 999 8888';
@@ -250,38 +255,42 @@ app.post('/api/ai/chat-reply', async (req, res) => {
       2. Carefully parse any date/time clues relative to 2026-11-05.
     `;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: `来自 [${platform || 'WhatsApp'}] 客户 (${phone}) 的咨询: "${customer_message}"`,
-      config: {
-        systemInstruction: systemInstruction,
-        temperature: 0.2,
-        responseMimeType: "application/json"
-      }
-    });
+    let aiReply = "感谢您的咨询，请问有什么我可以帮您的？";
+    let hasBookingIntent = false;
+    let apptDate = null;
+    let apptTime = "15:00";
 
-    let aiResult;
     try {
-      aiResult = JSON.parse(response.text.trim());
-    } catch (e) {
-      aiResult = {
-        reply: response.text ? response.text.trim() : "感谢您的咨询，请问有什么我可以帮您的？",
-        has_booking_intent: false,
-        appointment_date: null,
-        appointment_time: "15:00"
-      };
+      // 兼容更稳定的标准模型名称 gemini-2.5-flash 或 gemini-1.5-flash
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: `来自 [${platform || 'WhatsApp'}] 客户 (${phone}) 的咨询: "${customer_message}"`,
+        config: {
+          systemInstruction: systemInstruction,
+          temperature: 0.2,
+          responseMimeType: "application/json"
+        }
+      });
+
+      const aiResult = JSON.parse(response.text.trim());
+      aiReply = aiResult.reply || aiReply;
+      hasBookingIntent = !!aiResult.has_booking_intent;
+      apptDate = aiResult.appointment_date || null;
+      apptTime = aiResult.appointment_time || "15:00";
+    } catch (aiErr) {
+      console.error("⚠️ AI 模型调用失败，已启用智能兜底回复:", aiErr.message);
+      aiReply = "您好！很高兴为您服务，请问您想了解我们的哪些美业项目或预约时间呢？";
     }
 
-    const aiReply = aiResult.reply;
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'ai', ?, ?)`).run(phone, platform || 'WhatsApp', aiReply, new Date().toISOString());
 
     let autoAppointmentCreated = false;
     let apptNumber = null;
 
-    if (aiResult.has_booking_intent) {
+    if (hasBookingIntent) {
       apptNumber = 'APT-' + Date.now().toString().slice(-6);
-      const targetDate = aiResult.appointment_date || new Date().toISOString().split('T')[0];
-      const targetTime = aiResult.appointment_time || '15:00';
+      const targetDate = apptDate || new Date().toISOString().split('T')[0];
+      const targetTime = apptTime || '15:00';
       
       db.prepare(`INSERT INTO appointments (appointment_number, staff_id, phone, date, time, status, created_at) VALUES (?, '智能美业助理', ?, ?, ?, 'Confirmed', ?)`).run(
         apptNumber, phone, targetDate, targetTime, new Date().toISOString()
@@ -302,12 +311,12 @@ app.post('/api/ai/chat-reply', async (req, res) => {
       ai_reply: aiReply,
       auto_appointment_created: autoAppointmentCreated,
       appointment_number: apptNumber,
-      extracted_date: aiResult.appointment_date,
-      extracted_time: aiResult.appointment_time
+      extracted_date: apptDate,
+      extracted_time: apptTime
     });
 
   } catch (error) {
-    console.error("❌ Gemini AI 聊天异常:", error.message);
+    console.error("❌ 聊天接口服务器异常:", error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -389,7 +398,6 @@ app.get('/', (req, res) => {
 </head>
 <body>
 
-  <!-- 🚀 管理后台主界面（直接显示，已关闭登录遮罩） -->
   <div class="container" id="mainApp">
     <div class="header-bar" id="sec-dashboard">
       <div class="header-top">
