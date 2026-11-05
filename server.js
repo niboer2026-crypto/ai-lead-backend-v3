@@ -117,7 +117,6 @@ app.post('/api/auth/logout',(req,res)=>{res.setHeader('Set-Cookie',`${COOKIE_NAM
 
 app.use('/api',(req,res,next)=>{if(['/auth/status','/auth/setup','/auth/login','/auth/logout'].includes(req.path))return next();if(!getSession(req))return res.status(401).json({error:'请先登录',code:'AUTH_REQUIRED'});next();});
 
-// 更新为官方最新要求的 gemini-3.8-flash 模型
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 const ENC_KEY = crypto.createHash('sha256').update(AUTH_SECRET).digest();
 function encryptSecret(value){const iv=crypto.randomBytes(12),c=crypto.createCipheriv('aes-256-gcm',ENC_KEY,iv),data=Buffer.concat([c.update(value,'utf8'),c.final()]);return{encrypted_key:data.toString('base64'),iv:iv.toString('base64'),auth_tag:c.getAuthTag().toString('base64')};}
@@ -126,16 +125,18 @@ function loadStoredKey(){try{const r=db.prepare('SELECT encrypted_key,iv,auth_ta
 let apiKey=(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||loadStoredKey()||'').trim();
 let ai=apiKey?new GoogleGenAI({apiKey}):null;
 
-async function callGeminiWithRetry(payload, retries = 3, delay = 2000) {
+// 增强版 503 自动重试机制（最多自动重试 5 次，每次加倍等待时间）
+async function callGeminiWithRetry(payload, retries = 5, delay = 1500) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       return await ai.models.generateContent(payload);
     } catch (err) {
-      const isOverloaded = /503|unavailable|high demand|overloaded/i.test(err.message || '');
+      const errStr = String(err?.message || err);
+      const isOverloaded = /503|unavailable|high demand|overloaded/i.test(errStr);
       if (isOverloaded && attempt < retries) {
         console.warn(`[Gemini 503 Overloaded] 第 ${attempt} 次请求遇到高负载，正在等待 ${delay}ms 后自动重试...`);
         await new Promise(r => setTimeout(r, delay));
-        delay *= 2;
+        delay *= 2; // 指数退避
       } else {
         throw err;
       }
@@ -243,7 +244,7 @@ app.get('/api/leads', (req, res) => {
   res.json({ ok: true, leads: db.prepare("SELECT * FROM leads ORDER BY created_at DESC LIMIT 100").all() });
 });
 
-// AI 智能客服接口
+// AI 智能客服接口（内置防 503 自动重试）
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
   const phone = String(customer_phone || "Web Visitor").trim();
