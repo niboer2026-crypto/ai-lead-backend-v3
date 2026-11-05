@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const Database = require('better-sqlite3');
@@ -41,7 +42,15 @@ db.exec(`
     phone TEXT,
     source TEXT,
     center TEXT,
-    created_at TEXT
+    created_at TEXT,
+    external_id TEXT,
+    category TEXT,
+    address TEXT,
+    website TEXT,
+    email TEXT,
+    latitude REAL,
+    longitude REAL,
+    maps_url TEXT
   );
   CREATE TABLE IF NOT EXISTS appointments (
     appointment_number TEXT PRIMARY KEY,
@@ -67,6 +76,23 @@ db.exec(`
   );
 `);
 
+// 兼容旧版 data.db：为真实地图线索增加字段，不删除原有客户数据
+for (const [column, type] of [
+  ['external_id', 'TEXT'], ['category', 'TEXT'], ['address', 'TEXT'],
+  ['website', 'TEXT'], ['email', 'TEXT'], ['latitude', 'REAL'],
+  ['longitude', 'REAL'], ['maps_url', 'TEXT']
+]) {
+  try { db.exec(`ALTER TABLE leads ADD COLUMN ${column} ${type}`); } catch (e) {
+    if (!String(e.message).includes('duplicate column')) throw e;
+  }
+}
+try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_external_id ON leads(external_id) WHERE external_id IS NOT NULL'); } catch (e) {}
+
+// 清除旧版本自动获客演示代码生成的假线索；保留其他真实客户记录
+try {
+  db.prepare("DELETE FROM leads WHERE name LIKE '社媒潜在客户 (%' OR name LIKE '定向客户 (%'").run();
+} catch (e) { console.error('[Mock lead cleanup]', e.message); }
+
 // 🧹 自动清理：启动时自动清理 7 天前的旧聊天日志
 try {
   db.exec(`DELETE FROM chat_logs WHERE datetime(created_at) < datetime('now', '-7 days');`);
@@ -82,13 +108,30 @@ if (!existingConfig) {
 
 app.use(express.json());
 
-// 检查环境变量中的 API Key
-const apiKey = process.env.GEMINI_API_KEY;
+// Gemini 配置：密钥只放在服务器环境变量，绝不能放到前端
+const apiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "").trim();
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
+
 if (!apiKey) {
-  console.warn("⚠️ [警告] 未检测到 GEMINI_API_KEY 环境变量，AI 助手将无法正常响应。");
+  console.error("[Gemini] 缺少 GEMINI_API_KEY。请在运行 server.js 的服务器环境变量中配置。");
 }
 
-const ai = new GoogleGenAI({ apiKey: apiKey || "DUMMY_KEY" });
+function getGeminiErrorMessage(err) {
+  const raw = String(err?.message || err || "Unknown Gemini error");
+  const status = err?.status || err?.statusCode || err?.code;
+  if (/API_KEY_INVALID|invalid api key|API key not valid|401|unauthorized/i.test(raw)) return "Gemini API Key 无效或未授权，请重新检查 GEMINI_API_KEY。";
+  if (/PERMISSION_DENIED|403|permission/i.test(raw)) return "Gemini API 没有权限，请检查 Google AI Studio 项目和 API Key 权限。";
+  if (/RESOURCE_EXHAUSTED|429|quota|rate.?limit/i.test(raw)) return "Gemini 请求额度或速率限制已达到，请检查 API 配额或稍后重试。";
+  if (/NOT_FOUND|404|model/i.test(raw)) return `Gemini 模型不可用：${GEMINI_MODEL}。请检查模型名称或该 Key 的模型访问权限。`;
+  if (/fetch failed|ENOTFOUND|ECONN|timeout|network/i.test(raw)) return "服务器连接 Google Gemini 失败，请检查服务器网络或部署环境。";
+  return `Gemini 调用失败${status ? `（${status}）` : ""}：${raw.slice(0, 500)}`;
+}
+
+// AI 连通性状态：前端可直接检查是否配置密钥（不返回密钥本身）
+app.get('/api/ai/status', (req, res) => {
+  res.json({ ok: true, provider: "Gemini", configured: !!apiKey, model: GEMINI_MODEL });
+});
 
 // AI 配置 API
 app.get('/api/ai/config', (req, res) => {
@@ -196,128 +239,173 @@ app.post('/api/social-search/:id/run', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// ⚡ 一键自动获客批量调度
+// 社媒任务只打开平台公开搜索页面；不会假装已抓取客户，也不会生成虚假线索
 app.post('/api/social-search/batch-run', async (req, res) => {
+  return res.status(409).json({
+    ok: false,
+    code: 'SOCIAL_API_NOT_CONNECTED',
+    error: '社交平台尚未连接官方授权 API。为避免虚假数据，此功能不会生成客户或随机手机号。请先完成 Facebook/Instagram/TikTok 官方授权。'
+  });
+});
+
+// 免费真实商家数据：OpenStreetMap + Nominatim + Overpass（不是 Google Maps 数据）
+// 公共服务有速率和容量限制；不提供无限量抓取。仅保存 OSM 中实际存在的公开商家标签。
+const OSM_USER_AGENT = process.env.OSM_USER_AGENT || 'AILeadMaster/1.0 (business lead search; configure contact email in environment)';
+const OVERPASS_URL = process.env.OVERPASS_URL || 'https://overpass.private.coffee/api/interpreter';
+let lastNominatimRequestAt = 0;
+async function nominatimGeocode(query) {
+  const wait = Math.max(0, 1100 - (Date.now() - lastNominatimRequestAt));
+  if (wait) await new Promise(resolve => setTimeout(resolve, wait));
+  lastNominatimRequestAt = Date.now();
+  const url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=' + encodeURIComponent(query);
+  const response = await fetch(url, { headers: { 'User-Agent': OSM_USER_AGENT, 'Accept-Language': 'en' }, signal: AbortSignal.timeout(20000) });
+  if (!response.ok) throw new Error(`地点定位服务返回 HTTP ${response.status}`);
+  const rows = await response.json();
+  if (!rows.length) throw new Error('没有找到这个国家/城市，请换成英文城市名再试。');
+  return { lat: Number(rows[0].lat), lon: Number(rows[0].lon), display_name: rows[0].display_name };
+}
+
+function osmTagsToLead(element, locationLabel) {
+  const tags = element.tags || {};
+  const name = clean(tags.name || tags['name:en'] || tags.brand || '', 250);
+  if (!name) return null;
+  const phone = clean(tags.phone || tags['contact:phone'] || tags['contact:mobile'] || '', 100);
+  const website = clean(tags.website || tags['contact:website'] || '', 500);
+  const email = clean(tags.email || tags['contact:email'] || '', 250);
+  const address = [tags['addr:housenumber'], tags['addr:street'], tags['addr:suburb'], tags['addr:city'], tags['addr:postcode'], tags['addr:country']].filter(Boolean).join(', ');
+  const category = clean(tags.shop || tags.amenity || tags.office || tags.tourism || tags.craft || 'business', 100);
+  const lat = Number(element.lat ?? element.center?.lat);
+  const lon = Number(element.lon ?? element.center?.lon);
+  const externalId = `osm:${element.type}:${element.id}`;
+  const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([name, address || locationLabel].filter(Boolean).join(', '))}`;
+  return { id: externalId, external_id: externalId, name, phone, source: 'OpenStreetMap', center: locationLabel, created_at: new Date().toISOString(), category, address, website, email, latitude: Number.isFinite(lat) ? lat : null, longitude: Number.isFinite(lon) ? lon : null, maps_url: mapsUrl };
+}
+
+app.post('/api/maps/search', async (req, res) => {
   try {
-    const tasks = db.prepare(`SELECT s.*, a.label FROM social_search_configs s JOIN social_accounts a ON s.account_id = a.id WHERE s.enabled = 1`).all();
-    let newLeadsCount = 0;
-    
-    if (tasks.length === 0) {
-      const mockPhone = '+971 50 ' + Math.floor(100 + Math.random() * 900) + ' ' + Math.floor(1000 + Math.random() * 9000);
-      const leadId = 'LEAD-' + Date.now();
-      db.prepare(`INSERT OR IGNORE INTO leads (id, name, phone, source, center, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(
-        leadId, `社媒潜在客户 (Salon Dubai)`, mockPhone, `Instagram - Auto`, 'Dubai', new Date().toISOString()
-      );
-      newLeadsCount = 1;
-    } else {
-      for (const task of tasks) {
-        const mockPhone = '+971 50 ' + Math.floor(100 + Math.random() * 900) + ' ' + Math.floor(1000 + Math.random() * 9000);
-        const leadId = 'LEAD-' + Date.now() + '-' + Math.floor(Math.random() * 100);
-        db.prepare(`INSERT OR IGNORE INTO leads (id, name, phone, source, center, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(
-          leadId, `定向客户 (${task.keywords})`, mockPhone, `${task.platform} - ${task.label}`, task.city || 'Dubai', new Date().toISOString()
-        );
-        newLeadsCount++;
-      }
-    }
-    
-    res.json({ ok: true, message: `🚀 自动获客调度执行成功！新增潜在客户线索: ${newLeadsCount} 条` });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    const country = clean(req.body?.country, 100);
+    const city = clean(req.body?.city, 100);
+    const keyword = clean(req.body?.keyword, 120);
+    if (!country || !city || !keyword) return res.status(400).json({ ok: false, error: '国家、城市和商家关键词都必须填写。' });
+
+    const location = await nominatimGeocode(`${city}, ${country}`);
+    // 关键词用于 OSM name/category 标签匹配。半径固定 5km，避免对公共实例造成过大负载。
+    const safeKeyword = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 80);
+    const categoryPatterns = {
+      salon: 'beauty|hairdresser', beauty: 'beauty|hairdresser', spa: 'beauty|hairdresser',
+      restaurant: 'restaurant|fast_food', cafe: 'cafe', hotel: 'hotel|guest_house',
+      clinic: 'clinic|doctors|dentist', supermarket: 'supermarket|convenience',
+      shop: '.*'
+    };
+    const categoryRegex = categoryPatterns[keyword.toLowerCase()] || '.*';
+    const query = `[out:json][timeout:25];(nwr(around:5000,${location.lat},${location.lon})[name~"${safeKeyword}",i];nwr(around:5000,${location.lat},${location.lon})[shop~"${categoryRegex}",i];nwr(around:5000,${location.lat},${location.lon})[amenity~"${categoryRegex}",i];);out center tags 100;`;
+    const overpassResponse = await fetch(OVERPASS_URL, {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8', 'User-Agent': OSM_USER_AGENT },
+      body: 'data=' + encodeURIComponent(query), signal: AbortSignal.timeout(40000)
+    });
+    if (!overpassResponse.ok) throw new Error(`OpenStreetMap 查询服务返回 HTTP ${overpassResponse.status}，请稍后再试。`);
+    const payload = await overpassResponse.json();
+    const label = `${city}, ${country}`;
+    const results = (payload.elements || []).map(el => osmTagsToLead(el, label)).filter(Boolean);
+    const keywordLower = keyword.toLowerCase();
+    const categoryAliases = { salon: ['beauty', 'hairdresser'], beauty: ['beauty', 'hairdresser'], spa: ['spa', 'beauty', 'hairdresser'], restaurant: ['restaurant', 'fast_food'], cafe: ['cafe'], hotel: ['hotel', 'guest_house'], clinic: ['clinic', 'doctors', 'dentist'], supermarket: ['supermarket', 'convenience'] };
+    const terms = [keywordLower, ...(categoryAliases[keywordLower] || [])];
+    const filtered = results.filter(x => terms.some(term => `${x.name} ${x.category}`.toLowerCase().includes(term)) || keywordLower.split(/\s+/).some(w => w.length > 2 && `${x.name} ${x.category}`.toLowerCase().includes(w)));
+    const unique = [...new Map(filtered.map(x => [x.external_id, x])).values()].slice(0, 100);
+    const insert = db.prepare(`INSERT INTO leads (id,name,phone,source,center,created_at,external_id,category,address,website,email,latitude,longitude,maps_url)
+      VALUES (@id,@name,@phone,@source,@center,@created_at,@external_id,@category,@address,@website,@email,@latitude,@longitude,@maps_url)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone, category=excluded.category, address=excluded.address, website=excluded.website, email=excluded.email, latitude=excluded.latitude, longitude=excluded.longitude, maps_url=excluded.maps_url`);
+    const saveMany = db.transaction(rows => rows.forEach(row => insert.run({ ...row, phone: row.phone || null, address: row.address || null, website: row.website || null, email: row.email || null })));
+    saveMany(unique);
+    res.json({ ok: true, provider: 'OpenStreetMap', attribution: '© OpenStreetMap contributors', location: location.display_name, searched: unique.length, saved: unique.length, results: unique, notice: '结果来自 OpenStreetMap 公开地图标签；没有电话的网站不会补造电话。Google Maps 链接仅用于打开对应地点搜索。' });
+  } catch (error) {
+    console.error('[OSM lead search]', error);
+    res.status(502).json({ ok: false, error: error.message || '免费地图搜索失败，请稍后重试。' });
   }
 });
 
-// 🤖 核心修复：AI 消息处理与容错
+app.get('/api/leads', (req, res) => {
+  try {
+    const rows = db.prepare("SELECT * FROM leads ORDER BY created_at DESC LIMIT 500").all();
+    res.json({ ok: true, total: rows.length, leads: rows });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+
+// 🤖 Gemini 客服：真实调用失败时返回明确错误，不再伪装成 AI 成功回复
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
-  const phone = customer_phone || '+971 50 999 8888';
+  const phone = String(customer_phone || "").trim();
+  const message = String(customer_message || "").trim();
+  const channel = String(platform || "Website").trim();
 
-  if (!customer_message) {
-    return res.status(400).json({ error: "客户消息不能为空" });
+  if (!message) return res.status(400).json({ ok: false, error: "客户消息不能为空" });
+  if (message.length > 5000) return res.status(400).json({ ok: false, error: "消息过长，请控制在 5000 个字符以内" });
+  if (!apiKey || !ai) {
+    return res.status(503).json({ ok: false, error: "服务器尚未配置 Gemini API Key。请设置 GEMINI_API_KEY 后重启服务。", code: "GEMINI_KEY_MISSING" });
   }
 
   try {
-    db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'customer', ?, ?)`).run(phone, platform || 'WhatsApp', customer_message, new Date().toISOString());
+    const now = new Date();
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Dubai' }).format(now);
+    db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'customer', ?, ?)`).run(phone || 'Website Visitor', channel, message, now.toISOString());
 
     const currentConfig = db.prepare('SELECT system_prompt FROM ai_config WHERE id = 1').get();
-    const userPromptCustom = currentConfig ? currentConfig.system_prompt : defaultPrompt;
+    const userPromptCustom = currentConfig?.system_prompt || defaultPrompt;
+    const systemInstruction = `${userPromptCustom}
 
-    const systemInstruction = `
-      ${userPromptCustom}
-      You must respond in strict JSON format with the following keys:
-      {
-        "reply": "Your warm, elegant, professional assistant reply to the customer in their language (English, Arabic, or Chinese). Never call yourself AI Sales.",
-        "has_booking_intent": true or false,
-        "appointment_date": "YYYY-MM-DD if mentioned or implied, otherwise null (current date is 2026-11-05)",
-        "appointment_time": "HH:MM (24-hour format) if mentioned or implied, otherwise '15:00'"
-      }
-      Rules:
-      1. If the customer wants to book or asks about booking/pricing, set "has_booking_intent" to true.
-      2. Carefully parse any date/time clues relative to 2026-11-05.
-    `;
+You are the customer service assistant for a beauty salon business serving Dubai/UAE. Reply in the same language as the customer (English, Arabic, or Chinese). Be warm, concise, professional and helpful. Never claim a booking is confirmed unless the customer has clearly provided a date, time and phone number and the booking system has successfully created it. Do not invent prices, services, availability, addresses or policies; ask a short follow-up question when details are missing.
+Today in Dubai is ${today}.
+Return ONLY valid JSON with exactly these keys: {"reply":"string","has_booking_intent":false,"appointment_date":null,"appointment_time":null}. Set has_booking_intent=true only when the customer clearly asks to make an appointment, not merely asks about prices or services. Use YYYY-MM-DD for a clearly specified date and HH:MM (24-hour) for a clearly specified time. If date or time is unclear, return null for that field.`;
 
-    let aiReply = "感谢您的咨询，请问有什么我可以帮您的？";
-    let hasBookingIntent = false;
-    let apptDate = null;
-    let apptTime = "15:00";
-
-    try {
-      // 兼容更稳定的标准模型名称 gemini-2.5-flash 或 gemini-1.5-flash
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: `来自 [${platform || 'WhatsApp'}] 客户 (${phone}) 的咨询: "${customer_message}"`,
-        config: {
-          systemInstruction: systemInstruction,
-          temperature: 0.2,
-          responseMimeType: "application/json"
+    const response = await ai.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: `Customer channel: ${channel}
+Customer phone: ${phone || 'not provided'}
+Customer message: ${message}`,
+      config: {
+        systemInstruction,
+        temperature: 0.3,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            reply: { type: "STRING" },
+            has_booking_intent: { type: "BOOLEAN" },
+            appointment_date: { type: "STRING", nullable: true },
+            appointment_time: { type: "STRING", nullable: true }
+          },
+          required: ["reply", "has_booking_intent", "appointment_date", "appointment_time"]
         }
-      });
+      }
+    });
 
-      const aiResult = JSON.parse(response.text.trim());
-      aiReply = aiResult.reply || aiReply;
-      hasBookingIntent = !!aiResult.has_booking_intent;
-      apptDate = aiResult.appointment_date || null;
-      apptTime = aiResult.appointment_time || "15:00";
-    } catch (aiErr) {
-      console.error("⚠️ AI 模型调用失败，已启用智能兜底回复:", aiErr.message);
-      aiReply = "您好！很高兴为您服务，请问您想了解我们的哪些美业项目或预约时间呢？";
-    }
+    const rawText = response.text;
+    if (!rawText) throw new Error("Gemini 返回了空内容，请检查模型输出或安全过滤状态。");
+    let aiResult;
+    try { aiResult = JSON.parse(rawText); }
+    catch { throw new Error(`Gemini 返回内容不是有效 JSON：${rawText.slice(0, 300)}`); }
 
-    db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'ai', ?, ?)`).run(phone, platform || 'WhatsApp', aiReply, new Date().toISOString());
+    const aiReply = String(aiResult.reply || "Sorry, could you please repeat that?").trim();
+    const hasBookingIntent = aiResult.has_booking_intent === true;
+    const apptDate = /^\d{4}-\d{2}-\d{2}$/.test(aiResult.appointment_date || '') ? aiResult.appointment_date : null;
+    const apptTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(aiResult.appointment_time || '') ? aiResult.appointment_time : null;
 
+    db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'ai', ?, ?)`).run(phone || 'Website Visitor', channel, aiReply, new Date().toISOString());
+
+    // 只在客户明确提出预约且日期、时间、手机号齐全时创建预约，避免误生成预约单
     let autoAppointmentCreated = false;
     let apptNumber = null;
-
-    if (hasBookingIntent) {
+    if (hasBookingIntent && apptDate && apptTime && phone) {
       apptNumber = 'APT-' + Date.now().toString().slice(-6);
-      const targetDate = apptDate || new Date().toISOString().split('T')[0];
-      const targetTime = apptTime || '15:00';
-      
-      db.prepare(`INSERT INTO appointments (appointment_number, staff_id, phone, date, time, status, created_at) VALUES (?, '智能美业助理', ?, ?, ?, 'Confirmed', ?)`).run(
-        apptNumber, phone, targetDate, targetTime, new Date().toISOString()
-      );
-      
-      try {
-        db.prepare(`INSERT OR IGNORE INTO leads (id, name, phone, source, center, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(
-          'LEAD-' + Date.now(), '助理预约客户', phone, `${platform || 'WhatsApp'} - 智能助理`, 'Dubai', new Date().toISOString()
-        );
-      } catch(e){}
-
+      db.prepare(`INSERT INTO appointments (appointment_number, staff_id, phone, date, time, status, created_at) VALUES (?, 'Gemini Assistant', ?, ?, ?, 'Pending Confirmation', ?)`).run(apptNumber, phone, apptDate, apptTime, new Date().toISOString());
       autoAppointmentCreated = true;
     }
 
-    res.json({
-      ok: true,
-      customer_phone: phone,
-      ai_reply: aiReply,
-      auto_appointment_created: autoAppointmentCreated,
-      appointment_number: apptNumber,
-      extracted_date: apptDate,
-      extracted_time: apptTime
-    });
-
+    res.json({ ok: true, provider: "Gemini", model: GEMINI_MODEL, customer_phone: phone, ai_reply: aiReply, auto_appointment_created: autoAppointmentCreated, appointment_number: apptNumber, extracted_date: apptDate, extracted_time: apptTime });
   } catch (error) {
-    console.error("❌ 聊天接口服务器异常:", error.message);
-    res.status(500).json({ error: error.message });
+    const friendly = getGeminiErrorMessage(error);
+    console.error("[Gemini Chat Error]", error?.stack || error);
+    res.status(502).json({ ok: false, provider: "Gemini", model: GEMINI_MODEL, error: friendly, detail: String(error?.message || error).slice(0, 700) });
   }
 });
 
@@ -459,7 +547,7 @@ app.get('/', (req, res) => {
       </div>
 
       <div class="chat-input-group">
-        <input type="text" id="chatPhoneInput" data-i18n-ph="ph_phone" placeholder="客户手机号" value="+971 50 123 4567" style="padding: 10px; background: #1e293b; border: 1px solid #475569; color:#fff; border-radius:8px;">
+        <input type="text" id="chatPhoneInput" data-i18n-ph="ph_phone" placeholder="客户手机号" style="padding: 10px; background: #1e293b; border: 1px solid #475569; color:#fff; border-radius:8px;">
         <input type="text" id="chatMsgInput" data-i18n-ph="ph_msg" placeholder="输入测试咨询 (如: 帮我预约明天下午3点)" style="padding: 10px; background: #1e293b; border: 1px solid #475569; color:#fff; border-radius:8px;" onkeypress="if(event.key==='Enter') sendAiMessage()">
         <button class="primary" onclick="sendAiMessage()" style="width: auto; white-space: nowrap;" data-i18n="btn_send_ai">发送给助理</button>
       </div>
@@ -496,7 +584,25 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
-    <!-- 🌐 搜客任务与真实自动获客 -->
+    <!-- 🗺️ 免费真实商家线索：OSM 公共数据 -->
+    <div class="card" id="sec-maps-leads" style="border:1px solid #0ea5e9;">
+      <h3>🗺️ 免费真实商家获客（OpenStreetMap）</h3>
+      <p style="color:#94a3b8;font-size:13px;">无需 Google Maps API Key。按国家、城市和商家类型搜索公开地图资料；只保存真实返回的商家，不会生成假客户或随机电话。Google Maps 按钮只负责打开地图定位。</p>
+      <form id="mapsLeadForm" class="form-grid">
+        <div class="form-group"><label>国家</label><input id="mapsCountry" placeholder="United Arab Emirates" required></div>
+        <div class="form-group"><label>城市</label><input id="mapsCity" placeholder="Dubai" required></div>
+        <div class="form-group"><label>商家关键词</label><input id="mapsKeyword" placeholder="salon / restaurant / hotel / spa" required></div>
+        <div style="grid-column:1/-1;display:flex;gap:10px;flex-wrap:wrap;">
+          <button class="primary" type="submit" id="mapsSearchBtn">🔎 搜索真实商家</button>
+          <span id="mapsSearchStatus" style="color:#94a3b8;align-self:center;font-size:13px;"></span>
+        </div>
+      </form>
+      <div id="mapsSearchNotice" style="margin:12px 0;color:#fbbf24;font-size:12px;"></div>
+      <div class="table-responsive"><table><thead><tr><th>商家名称</th><th>类别</th><th>真实电话</th><th>网站</th><th>地址</th><th>来源</th><th>地图</th></tr></thead><tbody id="mapsLeadResults"><tr><td colspan="7" style="text-align:center;color:#64748b;">尚未搜索</td></tr></tbody></table></div>
+      <p style="font-size:11px;color:#64748b;margin-top:8px;">数据归属 OpenStreetMap，遵守其服务使用限制并显示数据署名。公共地图不保证每家商户都有电话或完整资料。</p>
+    </div>
+
+    <!-- 🌐 社媒任务设置（未接官方 API 前仅用于配置，不会生成线索） -->
     <div class="card" id="sec-search-task">
       <h3 data-i18n="task_title">🌐 2. 全自动社媒定向搜客任务</h3>
       <form id="socialSearchForm" class="form-grid">
@@ -508,7 +614,7 @@ app.get('/', (req, res) => {
         <div class="form-group"><label data-i18n="gender_label">性别筛选：</label><select id="ssGender"><option value="不限">All</option><option value="女性">Female</option></select></div>
         <div style="grid-column: 1 / -1; margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap;">
           <button type="submit" class="primary" style="flex: 2; min-width: 150px;" data-i18n="btn_create_task">💾 创建抓取任务</button>
-          <button type="button" class="purple-btn" style="flex: 1; min-width: 150px;" onclick="triggerBatchScrape()" data-i18n="btn_batch_scrape">⚡ 一键自动获客</button>
+          <button type="button" class="purple-btn" style="flex: 1; min-width: 150px;" onclick="triggerBatchScrape()" data-i18n="btn_batch_scrape">社媒 API 未连接（不可抓取）</button>
         </div>
       </form>
       <h4 style="margin-top: 20px; color: #38bdf8;" data-i18n="task_list_title">获客任务调度</h4>
@@ -522,7 +628,7 @@ app.get('/', (req, res) => {
       <h3 data-i18n="appt_title">📅 3. 智能预约排班与私域转化</h3>
       <form id="appointmentForm" class="form-grid">
         <div class="form-group"><label data-i18n="staff_label">接待技师：</label><input type="text" id="apptStaff" placeholder="Sarah (Dubai)" required></div>
-        <div class="form-group"><label data-i18n="phone_label">客户手机号：</label><input type="text" id="apptPhone" placeholder="+971 50 123 4567" required></div>
+        <div class="form-group"><label data-i18n="phone_label">客户手机号：</label><input type="text" id="apptPhone" placeholder="输入客户真实手机号" required></div>
         <div class="form-group"><label data-i18n="date_label">预约日期：</label><input type="date" id="apptDate" required></div>
         <div class="form-group"><label data-i18n="time_label">时间段：</label><input type="time" id="apptTime" required></div>
         <button type="submit" class="success" data-i18n="btn_create_appt">✅ 生成预约单</button>
@@ -572,7 +678,7 @@ app.get('/', (req, res) => {
         keyword_label: "关键词：",
         gender_label: "性别筛选：",
         btn_create_task: "💾 创建抓取任务",
-        btn_batch_scrape: "⚡ 一键自动获客",
+        btn_batch_scrape: "社媒 API 未连接（不可抓取）",
         task_list_title: "获客任务调度",
         th_acc: "账号",
         th_country: "国家",
@@ -700,6 +806,7 @@ app.get('/', (req, res) => {
       await loadAppointments();
       await loadSearchTasks();
       await loadChatLogs();
+      await loadStoredLeads();
       applyLanguage();
     }
 
@@ -761,7 +868,12 @@ app.get('/', (req, res) => {
           await loadStats();
         }
       } catch (err) {
-        alert("助理响应失败: " + err.message);
+        const errorDiv = document.createElement("div");
+        errorDiv.className = "msg customer";
+        errorDiv.style.background = "#7f1d1d";
+        errorDiv.textContent = "Gemini 客服发送失败：" + err.message;
+        container.appendChild(errorDiv);
+        container.scrollTop = container.scrollHeight;
       }
     }
 
@@ -837,6 +949,58 @@ app.get('/', (req, res) => {
       if (opt && opt.dataset.platform) document.getElementById("ssPlatform").value = opt.dataset.platform;
     });
 
+    async function loadStoredLeads() {
+      const tbody = document.getElementById("mapsLeadResults");
+      if (!tbody) return;
+      try {
+        const data = await api("/api/leads");
+        const leads = (data.leads || []).filter(x => x.source === "OpenStreetMap");
+        tbody.innerHTML = "";
+        if (!leads.length) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#64748b;">尚无真实地图线索</td></tr>'; return; }
+        leads.forEach(item => {
+          const tr = document.createElement("tr");
+          const add = value => { const td = document.createElement("td"); td.textContent = value || "—"; tr.appendChild(td); };
+          add(item.name); add(item.category); add(item.phone);
+          const websiteTd = document.createElement("td");
+          if (item.website) { const a = document.createElement("a"); a.href = item.website; a.target = "_blank"; a.rel = "noopener"; a.textContent = item.website; websiteTd.appendChild(a); } else websiteTd.textContent = "—";
+          tr.appendChild(websiteTd); add(item.address); add("OpenStreetMap");
+          const mapTd = document.createElement("td"); const mapA = document.createElement("a"); mapA.href = item.maps_url || "#"; mapA.target = "_blank"; mapA.rel = "noopener"; mapA.textContent = "Google Maps"; mapTd.appendChild(mapA); tr.appendChild(mapTd);
+          tbody.appendChild(tr);
+        });
+      } catch (e) { console.error("Load saved leads:", e); }
+    }
+
+    document.getElementById("mapsLeadForm")?.addEventListener("submit", async function(e) {
+      e.preventDefault();
+      const btn = document.getElementById("mapsSearchBtn");
+      const status = document.getElementById("mapsSearchStatus");
+      const body = {
+        country: document.getElementById("mapsCountry").value.trim(),
+        city: document.getElementById("mapsCity").value.trim(),
+        keyword: document.getElementById("mapsKeyword").value.trim()
+      };
+      btn.disabled = true; status.textContent = "正在查询真实地图数据…";
+      try {
+        const data = await api("/api/maps/search", { method: "POST", body: JSON.stringify(body) });
+        const tbody = document.getElementById("mapsLeadResults"); tbody.innerHTML = "";
+        if (!data.results.length) tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#94a3b8;">该区域没有找到匹配的公开商家数据。没有创建任何线索。</td></tr>';
+        data.results.forEach(item => {
+          const tr = document.createElement("tr");
+          const td = value => { const el = document.createElement("td"); el.textContent = value || "—"; return el; };
+          tr.appendChild(td(item.name)); tr.appendChild(td(item.category)); tr.appendChild(td(item.phone));
+          const webTd = document.createElement("td");
+          if (item.website) { const a = document.createElement("a"); a.href = item.website; a.target = "_blank"; a.rel = "noopener"; a.textContent = item.website; webTd.appendChild(a); } else webTd.textContent = "—";
+          tr.appendChild(webTd); tr.appendChild(td(item.address)); tr.appendChild(td("OpenStreetMap"));
+          const mapTd = document.createElement("td"); const mapA = document.createElement("a"); mapA.href = item.maps_url; mapA.target = "_blank"; mapA.rel = "noopener"; mapA.textContent = "Google Maps"; mapTd.appendChild(mapA); tr.appendChild(mapTd);
+          tbody.appendChild(tr);
+        });
+        document.getElementById("mapsSearchNotice").textContent = data.notice + " | 地点：" + data.location;
+        status.textContent = "搜索完成：" + data.searched + " 条真实记录，新增/更新 " + data.saved + " 条。";
+        await loadStats();
+      } catch (err) { status.textContent = "搜索失败：" + err.message; }
+      finally { btn.disabled = false; }
+    });
+
     async function loadSearchTasks() {
       const tbody = document.getElementById("socialSearchList");
       if (!tbody) return;
@@ -867,13 +1031,7 @@ app.get('/', (req, res) => {
     }
 
     async function triggerBatchScrape() {
-      try {
-        const res = await api("/api/social-search/batch-run", { method: "POST" });
-        alert(res.message);
-        await loadStats();
-      } catch (err) {
-        alert("自动获客执行失败: " + err.message);
-      }
+      alert("社交平台尚未接入官方授权 API，因此不会抓取或生成客户。请先使用上方免费真实商家搜索，社媒自动获客需完成 Meta/TikTok 官方授权。");
     }
 
     async function toggleTask(id, current) {
