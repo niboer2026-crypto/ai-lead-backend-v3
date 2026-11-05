@@ -181,7 +181,7 @@ app.get('/api/dashboard/stats', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 社媒账号管理（支持 180+ 矩阵号批量录入与隔离）
+// 社媒账号管理
 app.get('/api/social-accounts', (req, res) => {
   try { res.json(db.prepare('SELECT * FROM social_accounts ORDER BY id DESC').all()); }
   catch (err) { res.status(500).json({ error: err.message }); }
@@ -393,7 +393,7 @@ app.get('/api/ai/chat-logs', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 全功能直通 HTML 页面（免登无遮罩，修正发送按钮绑定）
+// 全功能直通 HTML 页面（免登无遮罩，带防卡死状态检测）
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="zh-CN">
@@ -586,26 +586,57 @@ app.get('/', (req, res) => {
 
     async function saveGeminiKey() {
       const key = document.getElementById("geminiApiKeyInput").value.trim();
+      const statusEl = document.getElementById("geminiKeyStatus");
       if (!key) return alert("请输入有效的 Key");
+      
+      statusEl.textContent = "⏳ 正在加密并保存 Key...";
       try {
         const res = await api("/api/ai/key", { method: "POST", body: JSON.stringify({ apiKey: key }) });
         alert(res.message);
         checkGeminiStatus();
-      } catch(e){ alert(e.message); }
+      } catch(e){ 
+        statusEl.textContent = "❌ 保存失败：" + e.message;
+        alert("保存失败：" + e.message); 
+      }
     }
 
     async function checkGeminiStatus() {
+      const statusEl = document.getElementById("geminiKeyStatus");
+      statusEl.textContent = "⏳ 正在检测状态...";
       try {
-        const res = await api("/api/ai/status");
-        document.getElementById("geminiKeyStatus").textContent = res.configured ? ("🟢 状态：已配置 Gemini API (" + res.model + ")") : "🔴 状态：未配置 Key，请填入后点击保存。";
-      } catch(e){}
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        
+        const res = await fetch("/api/ai/status", { signal: controller.signal });
+        clearTimeout(timeoutId);
+        
+        const data = await res.json();
+        if (data.configured) {
+          statusEl.textContent = "🟢 状态：已配置 Gemini API (" + (data.model || "gemini-2.5-flash") + ")";
+          statusEl.style.color = "#10b981";
+        } else {
+          statusEl.textContent = "🔴 状态：后端未检测到有效 Key，请重新输入并保存。";
+          statusEl.style.color = "#ef4444";
+        }
+      } catch(e) {
+        statusEl.textContent = "⚠️ 状态检测异常：" + (e.name === 'AbortError' ? '请求超时，请检查服务器网络' : e.message);
+        statusEl.style.color = "#f59e0b";
+      }
     }
 
     async function testGeminiKey() {
+      const statusEl = document.getElementById("geminiKeyStatus");
+      statusEl.textContent = "🧪 正在向 Gemini 发送测试请求...";
       try {
         const res = await api("/api/ai/key-test", { method: "POST", body: JSON.stringify({}) });
-        alert(res.message + "\n预览回复：" + res.preview);
-      } catch(e){ alert(e.message); }
+        statusEl.textContent = "🟢 测试成功：" + res.message;
+        statusEl.style.color = "#10b981";
+        alert(res.message + "\nAI 预览回复：" + res.preview);
+      } catch(e){ 
+        statusEl.textContent = "❌ 测试失败：" + e.message;
+        statusEl.style.color = "#ef4444";
+        alert("测试失败：" + e.message); 
+      }
     }
 
     async function sendAiMessage() {
