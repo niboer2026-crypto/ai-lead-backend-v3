@@ -100,7 +100,7 @@ app.use(express.json());
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// 增强版登录 API：加入详细的后端错误捕获与提示
+// 登录 API
 app.post('/api/login', (req, res) => {
   try {
     const { username, password } = req.body || {};
@@ -110,13 +110,13 @@ app.post('/api/login', (req, res) => {
     console.log(`🔑 收到登录请求: 用户名 [${cleanUser}]`);
 
     if (!cleanUser || !cleanPass) {
-      return res.status(400).json({ error: '用户名或密码不能为空 / Username or password cannot be empty' });
+      return res.status(400).json({ error: '用户名或密码不能为空' });
     }
 
     const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(cleanUser, cleanPass);
     if (!user) {
       console.warn(`⚠️ 登录失败: 用户名或密码错误 (${cleanUser})`);
-      return res.status(401).json({ error: '用户名或密码错误 / Invalid username or password' });
+      return res.status(401).json({ error: '用户名或密码错误，请检查输入 (默认: dubai / lcaizxy13)' });
     }
 
     console.log(`✅ 登录成功: 用户 [${user.username}], 角色 [${user.role}]`);
@@ -418,7 +418,7 @@ app.get('/', (req, res) => {
   <div id="loginOverlay">
     <div class="login-box">
       <h3 style="text-align:center; color:#38bdf8; margin-bottom:20px; font-size: 20px;" data-i18n="login_title">🔐 AI Lead Master 登录</h3>
-      <form id="loginForm" style="display:flex; flex-direction:column; gap:14px;">
+      <form id="loginForm" style="display:flex; flex-direction:column; gap:12px;">
         <div class="form-group">
           <label data-i18n="username_label">用户名：</label>
           <input type="text" id="loginUser" data-i18n-ph="ph_user" placeholder="请输入用户名" required>
@@ -427,8 +427,12 @@ app.get('/', (req, res) => {
           <label data-i18n="password_label">密码：</label>
           <input type="password" id="loginPass" data-i18n-ph="ph_pass" placeholder="请输入密码" required>
         </div>
-        <button type="submit" class="primary" style="padding: 12px; margin-top: 8px;" data-i18n="login_btn">登 录 系 统</button>
-        <div id="loginError" style="color:#f87171; font-size:12px; text-align:center; margin-top:5px;"></div>
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: #94a3b8; margin: 4px 0;">
+          <input type="checkbox" id="rememberMe" style="width: auto; cursor: pointer;">
+          <label for="rememberMe" style="cursor: pointer; color: #cbd5e1;" data-i18n="remember_me">记住密码 (Remember Me)</label>
+        </div>
+        <button type="submit" class="primary" style="padding: 12px; margin-top: 4px;" data-i18n="login_btn">登 录 系 统</button>
+        <div id="loginError" style="color:#f87171; font-size:12px; text-align:center; min-height: 18px;"></div>
       </form>
     </div>
   </div>
@@ -575,6 +579,7 @@ app.get('/', (req, res) => {
         password_label: "密码：",
         ph_user: "请输入用户名",
         ph_pass: "请输入密码",
+        remember_me: "记住密码 (Remember Me)",
         login_btn: "登 录 系 统",
         logout: "退出",
         nav_dashboard: "📊 仪表盘",
@@ -645,6 +650,7 @@ app.get('/', (req, res) => {
         password_label: "Password:",
         ph_user: "Enter username",
         ph_pass: "Enter password",
+        remember_me: "Remember Me",
         login_btn: "LOGIN SYSTEM",
         logout: "Logout",
         nav_dashboard: "📊 Dashboard",
@@ -737,39 +743,34 @@ app.get('/', (req, res) => {
     }
 
     async function api(url, options = {}) {
-      const res = await fetch(url, { headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "请求失败");
-      return data;
-    }
-
-    document.getElementById("loginForm")?.addEventListener("submit", async function(e) {
-      e.preventDefault();
-      const username = document.getElementById("loginUser").value.trim();
-      const password = document.getElementById("loginPass").value.trim();
-      const errEl = document.getElementById("loginError");
-      errEl.textContent = "⏳ 正在登录...";
       try {
-        const res = await api("/api/login", { method: "POST", body: JSON.stringify({ username, password }) });
-        localStorage.setItem("ai_lead_user", res.username);
-        localStorage.setItem("ai_lead_role", res.role);
-        document.getElementById("loginOverlay").style.display = "none";
-        document.getElementById("mainApp").style.display = "block";
-        document.getElementById("currentUserDisplay").textContent = "👤 " + res.username + " (" + (res.role === 'admin' ? 'Super Admin' : 'Staff') + ")";
-        loadAllData();
-      } catch (err) { 
-        errEl.textContent = "❌ 登录失败: " + err.message; 
+        const res = await fetch(url, { headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options });
+        const text = await res.text();
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch (e) {
+          throw new Error("服务器返回非 JSON 数据: " + text.slice(0, 100));
+        }
+        if (!res.ok) throw new Error(data.error || "请求失败 (HTTP " + res.status + ")");
+        return data;
+      } catch (err) {
+        throw err;
       }
-    });
-
-    function logout() {
-      localStorage.removeItem("ai_lead_user");
-      localStorage.removeItem("ai_lead_role");
-      location.reload();
     }
 
+    // 页面加载时：自动填充记住的账号密码
     window.addEventListener("DOMContentLoaded", () => {
       applyLanguage();
+      
+      const rememberedUser = localStorage.getItem("crm_saved_user");
+      const rememberedPass = localStorage.getItem("crm_saved_pass");
+      if (rememberedUser && rememberedPass) {
+        document.getElementById("loginUser").value = rememberedUser;
+        document.getElementById("loginPass").value = rememberedPass;
+        document.getElementById("rememberMe").checked = true;
+      }
+
       const savedUser = localStorage.getItem("ai_lead_user");
       const savedRole = localStorage.getItem("ai_lead_role");
       if (savedUser) {
@@ -779,6 +780,44 @@ app.get('/', (req, res) => {
         loadAllData();
       }
     });
+
+    document.getElementById("loginForm")?.addEventListener("submit", async function(e) {
+      e.preventDefault();
+      const username = document.getElementById("loginUser").value.trim();
+      const password = document.getElementById("loginPass").value.trim();
+      const remember = document.getElementById("rememberMe").checked;
+      const errEl = document.getElementById("loginError");
+      errEl.style.color = "#38bdf8";
+      errEl.textContent = "⏳ 正在连接服务器登录...";
+
+      // 处理记住密码本地存储
+      if (remember) {
+        localStorage.setItem("crm_saved_user", username);
+        localStorage.setItem("crm_saved_pass", password);
+      } else {
+        localStorage.removeItem("crm_saved_user");
+        localStorage.removeItem("crm_saved_pass");
+      }
+
+      try {
+        const res = await api("/api/login", { method: "POST", body: JSON.stringify({ username, password }) });
+        localStorage.setItem("ai_lead_user", res.username);
+        localStorage.setItem("ai_lead_role", res.role);
+        document.getElementById("loginOverlay").style.display = "none";
+        document.getElementById("mainApp").style.display = "block";
+        document.getElementById("currentUserDisplay").textContent = "👤 " + res.username + " (" + (res.role === 'admin' ? 'Super Admin' : 'Staff') + ")";
+        loadAllData();
+      } catch (err) { 
+        errEl.style.color = "#f87171";
+        errEl.textContent = "❌ " + err.message; 
+      }
+    });
+
+    function logout() {
+      localStorage.removeItem("ai_lead_user");
+      localStorage.removeItem("ai_lead_role");
+      location.reload();
+    }
 
     async function loadAllData() {
       const role = localStorage.getItem("ai_lead_role");
