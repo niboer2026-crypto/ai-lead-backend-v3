@@ -9,7 +9,9 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 // 初始化本地 SQLite 数据库
-const db = new Database('data.db');
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data.db');
+const db = new Database(DB_PATH);
+console.log(`[DB] SQLite database: ${DB_PATH}`);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -118,48 +120,48 @@ app.use(express.json());
 
 // Admin first-run setup and signed-cookie authentication
 const AUTH_SECRET = process.env.APP_ENCRYPTION_KEY || process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
-if (!process.env.APP_ENCRYPTION_KEY && !process.env.SESSION_SECRET) console.warn('[Security] 建议在 Render 设置固定 APP_ENCRYPTION_KEY，否则重启后需要重新登录，后台加密保存的 Gemini Key 也无法解密。');
+if (!process.env.APP_ENCRYPTION_KEY && !process.env.SESSION_SECRET) console.warn('[Security] 请设置长期固定的 APP_ENCRYPTION_KEY；否则服务重启后会使登录会话失效，且后台保存的 Gemini Key 无法解密。');
 const COOKIE_NAME = 'alm_session';
 function signToken(payload) { const body=Buffer.from(JSON.stringify(payload)).toString('base64url'); const sig=crypto.createHmac('sha256',AUTH_SECRET).update(body).digest('base64url'); return body+'.'+sig; }
 function verifyToken(token) { try { const [body,sig]=String(token||'').split('.'); const expected=crypto.createHmac('sha256',AUTH_SECRET).update(body).digest(); const actual=Buffer.from(sig,'base64url'); if(actual.length!==expected.length||!crypto.timingSafeEqual(actual,expected)) return null; const d=JSON.parse(Buffer.from(body,'base64url').toString()); return d.exp>Date.now()?d:null; } catch { return null; } }
 function getSession(req) { const c=String(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(COOKIE_NAME+'=')); return c?verifyToken(decodeURIComponent(c.slice(COOKIE_NAME.length+1))):null; }
 function hashPassword(password,salt=crypto.randomBytes(16).toString('hex')) { return {salt,hash:crypto.scryptSync(password,salt,64).toString('hex')}; }
 function checkPassword(password,salt,hash) { const a=crypto.scryptSync(password,salt,64), b=Buffer.from(hash,'hex'); return a.length===b.length&&crypto.timingSafeEqual(a,b); }
-// ===== 超级管理员账号初始化 =====
-const SUPERADMIN_USERNAME = 'dubai';
-const SUPERADMIN_PASSWORD = 'lcaizxy13';
 
-{
-  const user = db.prepare(
-    'SELECT id FROM users WHERE username = ?'
-  ).get(SUPERADMIN_USERNAME);
-
-  const passwordData = hashPassword(SUPERADMIN_PASSWORD);
-
-  const storedPassword =
-    passwordData.salt + ':' + passwordData.hash;
-
-  if (user) {
-    // 已存在就更新密码，并设为管理员
-    db.prepare(`
-      UPDATE users
-      SET password = ?, role = 'admin'
-      WHERE id = ?
-    `).run(storedPassword, user.id);
-
-  } else {
-    // 不存在就创建超级管理员
-    db.prepare(`
-      INSERT INTO users (username, password, role)
-      VALUES (?, ?, 'admin')
-    `).run(SUPERADMIN_USERNAME, storedPassword);
+// 可通过部署环境变量安全初始化/重置指定管理员；密码不写入源码或 ZIP。
+const ADMIN_USERNAME = String(process.env.ADMIN_USERNAME || '').trim();
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+function bootstrapAdmin() {
+  if (!ADMIN_USERNAME || !ADMIN_PASSWORD) {
+    console.log('[AUTH] 未设置 ADMIN_USERNAME/ADMIN_PASSWORD，使用首次访问页面创建管理员。');
+    return;
   }
-
-  console.log('超级管理员账号初始化成功：dubai');
+  if (!/^[a-zA-Z0-9_.-]{3,40}$/.test(ADMIN_USERNAME)) {
+    throw new Error('ADMIN_USERNAME 必须为 3-40 位字母、数字或 . _ -');
+  }
+  if (ADMIN_PASSWORD.length < 8) {
+    throw new Error('ADMIN_PASSWORD 至少需要 8 个字符。');
+  }
+  const existing = db.prepare('SELECT id FROM users WHERE username = ?').get(ADMIN_USERNAME);
+  const reset = String(process.env.ADMIN_BOOTSTRAP_RESET || '').toLowerCase() === 'true';
+  if (!existing) {
+    const h = hashPassword(ADMIN_PASSWORD);
+    db.prepare("INSERT INTO users(username,password,role) VALUES(?,?,'admin')")
+      .run(ADMIN_USERNAME, h.salt + ':' + h.hash);
+    console.log(`[AUTH] 管理员 ${ADMIN_USERNAME} 已初始化。`);
+  } else if (reset) {
+    const h = hashPassword(ADMIN_PASSWORD);
+    db.prepare("UPDATE users SET password=?, role='admin' WHERE username=?")
+      .run(h.salt + ':' + h.hash, ADMIN_USERNAME);
+    console.log(`[AUTH] 管理员 ${ADMIN_USERNAME} 的密码已按环境变量重置。`);
+  } else {
+    db.prepare("UPDATE users SET role='admin' WHERE username=?").run(ADMIN_USERNAME);
+    console.log(`[AUTH] 管理员 ${ADMIN_USERNAME} 已存在；未覆盖现有密码。`);
+  }
 }
-// ===== 初始化结束 =====
+bootstrapAdmin();
 app.get('/api/auth/status',(req,res)=>{ const admin=db.prepare("SELECT id FROM users WHERE role='admin' LIMIT 1").get(); const session=getSession(req); res.json({setupRequired:!admin,authenticated:!!session,username:session?.username||null}); });
-app.post('/api/auth/setup',(req,res)=>{ if(db.prepare("SELECT id FROM users WHERE role='admin' LIMIT 1").get()) return res.status(409).json({error:'管理员已经创建，请直接登录。'}); const username=String(req.body?.username||'').trim().slice(0,40), password=String(req.body?.password||''); if(!/^[a-zA-Z0-9_.-]{3,40}$/.test(username)) return res.status(400).json({error:'用户名需为 3-40 位字母、数字或 . _ -'}); if(password.length<10) return res.status(400).json({error:'密码至少 10 位。'}); const h=hashPassword(password); db.prepare('INSERT INTO users(username,password,role) VALUES(?,?,?)').run(username,h.salt+':'+h.hash,'admin'); const token=signToken({username,exp:Date.now()+7*86400000}); res.setHeader('Set-Cookie',`${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800${process.env.NODE_ENV==='production'?'; Secure':''}`); res.json({ok:true,username}); });
+app.post('/api/auth/setup',(req,res)=>{ if(db.prepare("SELECT id FROM users WHERE role='admin' LIMIT 1").get()) return res.status(409).json({error:'管理员已经创建，请直接登录。'}); const username=String(req.body?.username||'').trim().slice(0,40), password=String(req.body?.password||''); if(!/^[a-zA-Z0-9_.-]{3,40}$/.test(username)) return res.status(400).json({error:'用户名需为 3-40 位字母、数字或 . _ -'}); if(password.length<8) return res.status(400).json({error:'密码至少 8 位。'}); const h=hashPassword(password); db.prepare('INSERT INTO users(username,password,role) VALUES(?,?,?)').run(username,h.salt+':'+h.hash,'admin'); const token=signToken({username,exp:Date.now()+7*86400000}); res.setHeader('Set-Cookie',`${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800${process.env.NODE_ENV==='production'?'; Secure':''}`); res.json({ok:true,username}); });
 app.post('/api/auth/login',(req,res)=>{ const username=String(req.body?.username||'').trim(), password=String(req.body?.password||''); const row=db.prepare("SELECT * FROM users WHERE username=? AND role='admin'").get(username); if(!row) return res.status(401).json({error:'用户名或密码错误。'}); const [salt,hash]=String(row.password).split(':'); const valid=hash?checkPassword(password,salt,hash):row.password===password; if(!valid) return res.status(401).json({error:'用户名或密码错误。'}); const token=signToken({username,exp:Date.now()+7*86400000}); res.setHeader('Set-Cookie',`${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800${process.env.NODE_ENV==='production'?'; Secure':''}`); res.json({ok:true,username}); });
 app.post('/api/auth/logout',(req,res)=>{res.setHeader('Set-Cookie',`${COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${process.env.NODE_ENV==='production'?'; Secure':''}`);res.json({ok:true});});
 app.use('/api',(req,res,next)=>{if(['/auth/status','/auth/setup','/auth/login','/auth/logout'].includes(req.path))return next();if(!getSession(req))return res.status(401).json({error:'登录已失效，请重新登录。',code:'AUTH_REQUIRED'});next();});
@@ -192,7 +194,7 @@ app.get('/api/ai/status', (req, res) => {
 
 
 // 保存 Gemini Key：服务端 AES-256-GCM 加密，不向浏览器返回明文。
-app.post('/api/ai/key',(req,res)=>{try{if(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY)return res.status(409).json({error:'当前优先使用 Render 环境变量 Key。请先删除 GEMINI_API_KEY / GOOGLE_API_KEY，才能改用后台保存。'});const key=String(req.body?.apiKey||'').trim();if(key.length<20||key.length>500)return res.status(400).json({error:'请填写有效的 Gemini API Key。'});const e=encryptSecret(key);db.prepare(`INSERT INTO ai_secrets(id,encrypted_key,iv,auth_tag,updated_at) VALUES(1,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET encrypted_key=excluded.encrypted_key,iv=excluded.iv,auth_tag=excluded.auth_tag,updated_at=CURRENT_TIMESTAMP`).run(e.encrypted_key,e.iv,e.auth_tag);apiKey=key;ai=new GoogleGenAI({apiKey});res.json({ok:true,message:'Gemini Key 已加密保存，可以测试连接。'});}catch(err){res.status(500).json({error:err.message});}});
+app.post('/api/ai/key',(req,res)=>{try{if(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY)return res.status(409).json({error:'服务器已配置环境变量 Key，当前优先使用该 Key。若要改为后台保存，请先移除 GEMINI_API_KEY / GOOGLE_API_KEY 后重新部署。'});const key=String(req.body?.apiKey||'').trim();if(key.length<20||key.length>500)return res.status(400).json({error:'请填写有效的 Gemini API Key。'});const e=encryptSecret(key);db.prepare(`INSERT INTO ai_secrets(id,encrypted_key,iv,auth_tag,updated_at) VALUES(1,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET encrypted_key=excluded.encrypted_key,iv=excluded.iv,auth_tag=excluded.auth_tag,updated_at=CURRENT_TIMESTAMP`).run(e.encrypted_key,e.iv,e.auth_tag);apiKey=key;ai=new GoogleGenAI({apiKey});res.json({ok:true,message:'Gemini Key 已加密保存，可以测试连接。'});}catch(err){res.status(500).json({error:err.message});}});
 
 // Gemini 连通性测试：只测试 Render 环境变量中的 Key，不接收或保存用户提交的密钥。
 app.post('/api/ai/key-test', async (req, res) => {
@@ -618,16 +620,23 @@ app.get('/', (req, res) => {
       </form>
     </div>
 
-    <!-- Gemini API 配置状态：密钥仅在 Render 环境变量中管理 -->
+    <!-- Gemini API 配置：管理员可直接在后台填写，服务器加密保存 -->
     <div class="card" id="sec-gemini-key" style="border:1px solid #10b981;">
-      <h3 style="color:#34d399;">🔐 Gemini AI 连接状态</h3>
-      <p style="font-size:13px;color:#64748b;">填写 API Key 后保存。密钥只发送到服务器并加密保存在数据库，不会显示在页面。</p>
-      <div class="form-grid" style="margin:14px 0;"><div class="form-group" style="grid-column:1/-1"><label>Gemini API Key</label><input id="geminiApiKeyInput" type="password" autocomplete="new-password" placeholder="粘贴 Google AI Studio API Key"></div><div style="display:flex;gap:8px;flex-wrap:wrap;grid-column:1/-1"><button type="button" class="primary" onclick="saveGeminiKey()">🔐 保存 API Key</button><button type="button" class="success" onclick="testGeminiKey()">🧪 测试连接</button><button type="button" class="secondary" onclick="checkGeminiStatus()">刷新状态</button></div></div>
+      <h3 style="color:#34d399;">🔐 Gemini AI 密钥设置</h3>
+      <p style="font-size:13px;color:#64748b;">可直接在此处添加 Gemini API Key。密钥会发送到服务器并使用 AES-256-GCM 加密保存，不会回显到网页。</p>
+      <div class="form-grid" style="margin:14px 0;">
+        <div class="form-group" style="grid-column:1/-1">
+          <label for="geminiApiKeyInput">Gemini API Key</label>
+          <input id="geminiApiKeyInput" type="password" autocomplete="new-password" placeholder="粘贴 Google AI Studio 提供的 Gemini API Key">
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;grid-column:1/-1">
+          <button type="button" class="primary" onclick="saveGeminiKey()">🔐 保存密钥</button>
+          <button type="button" class="success" onclick="testGeminiKey()">🧪 测试连接</button>
+          <button type="button" class="secondary" onclick="checkGeminiStatus()">刷新状态</button>
+        </div>
+      </div>
       <p id="geminiKeyStatus" style="margin-top:12px;color:#64748b;font-size:13px;">状态：等待检查</p>
-      <p style="margin-top:6px;color:#b45309;font-size:12px;">重要：Render 需配置持久磁盘保存 data.db，并设置固定 APP_ENCRYPTION_KEY；否则重启后后台保存的 Key 可能丢失或无法解密。</p>
-    </div>
-      <p id="geminiKeyStatus" style="margin-top:12px;color:#94a3b8;font-size:13px;">状态：等待检查</p>
-      <p style="margin-top:6px;color:#fbbf24;font-size:12px;">Render → ai-lead-backend-v3 → Environment：添加 GEMINI_API_KEY，Value 填入你的 Gemini Key，然后 Save Changes 等待重新部署。</p>
+      <p style="margin-top:6px;color:#b45309;font-size:12px;">提示：后台保存的密钥保存在 SQLite 数据库中。请配置持久化磁盘，并长期固定 APP_ENCRYPTION_KEY，否则重启或更换密钥可能导致无法解密。</p>
     </div>
 
     <!-- 👤 社媒配置 -->
@@ -903,7 +912,7 @@ app.get('/', (req, res) => {
       const el = document.getElementById('geminiKeyStatus');
       try {
         const result = await api('/api/ai/status');
-        el.textContent = result.configured ? ('状态：已配置 · 模型 ' + result.model) : '状态：未配置，请在 Render Environment 添加 GEMINI_API_KEY。';
+        el.textContent = result.configured ? ('状态：已配置 · 模型 ' + result.model + ' · 来源 ' + (result.source === 'dashboard' ? '后台保存' : '服务器环境变量')) : '状态：尚未配置，请在上方输入 Gemini API Key 并保存。';
       } catch (e) { el.textContent = '状态检查失败：' + e.message; }
     }
     async function testGeminiKey() {
