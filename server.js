@@ -6,7 +6,6 @@ const { GoogleGenAI } = require('@google/genai');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// 初始化本地 SQLite 数据库
 const db = new Database('data.db');
 
 db.exec(`
@@ -67,7 +66,6 @@ db.exec(`
   );
 `);
 
-// 🧹 自动清理机制：每次服务启动时，自动清理超过 7 天的旧聊天日志
 try {
   db.exec(`
     DELETE FROM chat_logs 
@@ -86,7 +84,6 @@ if (!existingConfig) {
   db.prepare('INSERT INTO ai_config (id, welcome_msg, system_prompt) VALUES (1, ?, ?)').run(defaultWelcome, defaultPrompt);
 }
 
-// 强制同步超管账号：dubai / lcaizxy13
 const superAdminUser = 'dubai';
 const superAdminPass = 'lcaizxy13';
 const existingAdmin = db.prepare('SELECT * FROM users WHERE username = ?').get(superAdminUser);
@@ -100,14 +97,11 @@ app.use(express.json());
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// 登录 API
 app.post('/api/login', (req, res) => {
   try {
     const { username, password } = req.body || {};
     const cleanUser = String(username || "").trim();
     const cleanPass = String(password || "").trim();
-
-    console.log(`🔑 收到登录请求: 用户名 [${cleanUser}]`);
 
     if (!cleanUser || !cleanPass) {
       return res.status(400).json({ error: '用户名或密码不能为空' });
@@ -115,14 +109,11 @@ app.post('/api/login', (req, res) => {
 
     const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(cleanUser, cleanPass);
     if (!user) {
-      console.warn(`⚠️ 登录失败: 用户名或密码错误 (${cleanUser})`);
-      return res.status(401).json({ error: '用户名或密码错误，请检查输入 (默认: dubai / lcaizxy13)' });
+      return res.status(401).json({ error: '用户名或密码错误 (默认: dubai / lcaizxy13)' });
     }
 
-    console.log(`✅ 登录成功: 用户 [${user.username}], 角色 [${user.role}]`);
     res.json({ ok: true, username: user.username, role: user.role });
   } catch (err) {
-    console.error("❌ 登录接口异常:", err.message);
     res.status(500).json({ error: '服务器内部错误: ' + err.message });
   }
 });
@@ -396,7 +387,20 @@ app.get('/', (req, res) => {
     th, td { border: 1px solid #334155; padding: 10px; text-align: left; }
     th { background-color: #1e293b; font-weight: 600; color: #38bdf8; text-transform: uppercase; font-size: 11px; }
     tr:nth-child(even) { background-color: rgba(30, 41, 59, 0.4); }
-    #loginOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15,23,42,0.95); display: flex; justify-content: center; align-items: center; z-index: 9999; padding: 15px; }
+    
+    #loginOverlay { 
+      position: fixed; 
+      top: 0; 
+      left: 0; 
+      width: 100%; 
+      height: 100%; 
+      background: rgba(15,23,42,0.95); 
+      display: flex; 
+      justify-content: center; 
+      align-items: center; 
+      z-index: 9999; 
+      padding: 15px; 
+    }
     .login-box { background: #1e293b; padding: 25px; border-radius: 16px; width: 100%; max-width: 360px; border: 1px solid #334155; box-shadow: 0 15px 35px rgba(0,0,0,0.6); }
     .badge { padding: 3px 8px; border-radius: 20px; font-size: 11px; font-weight: bold; display: inline-block; }
     .badge.fb { background: #1d4ed8; color: #bfdbfe; }
@@ -759,7 +763,6 @@ app.get('/', (req, res) => {
       }
     }
 
-    // 页面加载时：自动填充记住的账号密码
     window.addEventListener("DOMContentLoaded", () => {
       applyLanguage();
       
@@ -790,7 +793,6 @@ app.get('/', (req, res) => {
       errEl.style.color = "#38bdf8";
       errEl.textContent = "⏳ 正在连接服务器登录...";
 
-      // 处理记住密码本地存储
       if (remember) {
         localStorage.setItem("crm_saved_user", username);
         localStorage.setItem("crm_saved_pass", password);
