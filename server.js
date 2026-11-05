@@ -2,6 +2,7 @@ const express = require('express');
 const path = require('path');
 const Database = require('better-sqlite3');
 const { GoogleGenAI } = require('@google/genai');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -86,14 +87,15 @@ if (!existingConfig) {
   db.prepare('INSERT INTO ai_config (id, welcome_msg, system_prompt) VALUES (1, ?, ?)').run(defaultWelcome, defaultPrompt);
 }
 
-// 强制同步超管账号：dubai / lcaizxy13
+// 🔐 安全优化：仅在数据库中完全没有超管账号时才进行首次初始化，决不每次重启强行覆盖
 const superAdminUser = 'dubai';
-const superAdminPass = 'lcaizxy13';
+const superAdminPass = 'lcaizxy13'; // 生产环境可改用更安全的方式
 const existingAdmin = db.prepare('SELECT * FROM users WHERE username = ?').get(superAdminUser);
 if (!existingAdmin) {
   db.prepare('INSERT INTO users (username, password, role) VALUES (?, ?, ?)').run(superAdminUser, superAdminPass, 'admin');
+  console.log("🔒 [安全提示] 已完成超管账号首次初始化：dubai");
 } else {
-  db.prepare('UPDATE users SET password = ?, role = ? WHERE username = ?').run(superAdminPass, 'admin', superAdminUser);
+  console.log("🔒 [安全提示] 超管账号已存在，保留当前数据库密码配置。");
 }
 
 app.use(express.json());
@@ -360,14 +362,17 @@ app.get('/', (req, res) => {
     .nav-btn { flex: 0 0 auto; background: #0f172a; color: #38bdf8; border: 1px solid #334155; padding: 8px 16px; border-radius: 20px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
     .nav-btn:hover, .nav-btn:active { background: #38bdf8; color: #0f172a; }
     .lang-btn { background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff; border: none; padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: bold; cursor: pointer; }
-    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 25px; }
-    .stat-card { padding: 15px; border-radius: 12px; color: #fff; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 25px; }
+    .stat-card { padding: 18px; border-radius: 14px; color: #fff; box-shadow: 0 6px 16px rgba(0,0,0,0.25); display: flex; flex-direction: column; justify-content: space-between; transition: transform 0.2s; }
+    .stat-card:hover { transform: translateY(-3px); }
     .stat-card.blue { background: linear-gradient(135deg, #3b82f6, #1d4ed8); }
     .stat-card.purple { background: linear-gradient(135deg, #a855f7, #6b21a8); }
     .stat-card.pink { background: linear-gradient(135deg, #ec4899, #be185d); }
     .stat-card.emerald { background: linear-gradient(135deg, #10b981, #047857); }
-    .stat-card h4 { margin: 0 0 8px 0; font-size: 12px; text-transform: uppercase; }
-    .stat-card .num { font-size: 24px; font-weight: bold; }
+    .stat-card h4 { margin: 0 0 6px 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.9; }
+    .stat-card .num { font-size: 28px; font-weight: bold; margin-bottom: 12px; }
+    .card-action-btn { background: rgba(255, 255, 255, 0.2); border: 1px solid rgba(255, 255, 255, 0.4); color: #fff; padding: 6px 12px; border-radius: 8px; font-size: 12px; font-weight: bold; cursor: pointer; text-align: center; transition: background 0.2s; }
+    .card-action-btn:hover { background: rgba(255, 255, 255, 0.35); }
     .card { background: #0f172a; border: 1px solid #334155; border-radius: 12px; padding: 16px; margin-bottom: 20px; }
     h3 { color: #f1f5f9; margin-top: 0; border-bottom: 2px solid #334155; padding-bottom: 8px; font-size: 16px; }
     .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; align-items: end; }
@@ -425,22 +430,35 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
+    <!-- 📊 仪表盘带功能跳转按钮 -->
     <div class="stats-grid">
       <div class="stat-card blue">
-        <h4 data-i18n="stat_total">📦 总线索量</h4>
-        <div class="num" id="valTotalLeads">0</div>
+        <div>
+          <h4 data-i18n="stat_total">📦 总线索量</h4>
+          <div class="num" id="valTotalLeads">0</div>
+        </div>
+        <button class="card-action-btn" onclick="scrollToSec('sec-appointments')" data-i18n="btn_jump_appts">📅 查看预约管理 &rarr;</button>
       </div>
       <div class="stat-card purple">
-        <h4>📘 Facebook</h4>
-        <div class="num" id="valFbLeads">0</div>
+        <div>
+          <h4>📘 Facebook</h4>
+          <div class="num" id="valFbLeads">0</div>
+        </div>
+        <button class="card-action-btn" onclick="scrollToSec('sec-social-acc')" data-i18n="btn_jump_social">👤 配置社媒账号 &rarr;</button>
       </div>
       <div class="stat-card pink">
-        <h4>📸 Instagram</h4>
-        <div class="num" id="valIgLeads">0</div>
+        <div>
+          <h4>📸 Instagram</h4>
+          <div class="num" id="valIgLeads">0</div>
+        </div>
+        <button class="card-action-btn" onclick="scrollToSec('sec-search-task')" data-i18n="btn_jump_tasks">🌐 搜客获客任务 &rarr;</button>
       </div>
       <div class="stat-card emerald">
-        <h4>🎵 TikTok</h4>
-        <div class="num" id="valTkLeads">0</div>
+        <div>
+          <h4>🎵 TikTok</h4>
+          <div class="num" id="valTkLeads">0</div>
+        </div>
+        <button class="card-action-btn" onclick="scrollToSec('sec-ai-chat')" data-i18n="btn_jump_ai">🤖 进入AI助理工作台 &rarr;</button>
       </div>
     </div>
 
@@ -549,6 +567,10 @@ app.get('/', (req, res) => {
         nav_tasks: "🌐 搜客任务",
         nav_appts: "📅 预约列表",
         stat_total: "📦 总线索量",
+        btn_jump_appts: "📅 查看预约管理 &rarr;",
+        btn_jump_social: "👤 配置社媒账号 &rarr;",
+        btn_jump_tasks: "🌐 搜客获客任务 &rarr;",
+        btn_jump_ai: "🤖 进入AI助理工作台 &rarr;",
         ai_title: "🤖 智能美业助理与预约工作台",
         ai_desc: "客户输入预约意向，助理将温柔解答并自动精准识别时间生成预约单！",
         ph_phone: "客户手机号",
@@ -614,6 +636,10 @@ app.get('/', (req, res) => {
         nav_tasks: "🌐 Lead Tasks",
         nav_appts: "📅 Appointments",
         stat_total: "📦 Total Leads",
+        btn_jump_appts: "📅 View Appointments &rarr;",
+        btn_jump_social: "👤 Setup Social &rarr;",
+        btn_jump_tasks: "🌐 Lead Scraper &rarr;",
+        btn_jump_ai: "🤖 Open AI Assistant &rarr;",
         ai_title: "🤖 Beauty Assistant & Auto-Booking Workspace",
         ai_desc: "Customers message with booking intent, Senior Assistant replies warmly and creates appointments!",
         ph_phone: "Customer Phone Number",
