@@ -1,4 +1,4 @@
-Require('dotenv').config();
+require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
@@ -123,58 +123,36 @@ function loadStoredKey(){try{const r=db.prepare('SELECT encrypted_key,iv,auth_ta
 let apiKey=(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||loadStoredKey()||'').trim();
 let ai=apiKey?new GoogleGenAI({apiKey}):null;
 
-// ========== 【重点修改这里：修复超时、模型、重试逻辑】 ==========
-const AI_TIMEOUT = 12000;
-const MAX_RETRY_PER_MODEL = 1;
-// 官方合法模型，删掉无效的 gemini-flash
-const MODEL_LIST = ["gemini-2.5-flash", "gemini-2.0-flash"];
+// 🛡️ 鲁棒性极强的多模型自动切换与降级策略
+const MODEL_CANDIDATES = ["gemini-2.5-flash", "gemini-2.0-flash"];
 
-function promiseTimeout(promise, ms, errMsg = "AI 请求超时") {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(errMsg)), ms))
-  ]);
-}
-
-async function callGeminiSafe(promptText, systemPrompt) {
+async function callGeminiRobust(promptText, systemPrompt) {
   if (!apiKey || !ai) throw new Error("未配置有效的 Gemini API Key");
+  
   let lastError = null;
-
-  for (const model of MODEL_LIST) {
-    for (let r = 0; r <= MAX_RETRY_PER_MODEL; r++) {
-      try {
-        const result = await promiseTimeout(
-          ai.models.generateContent({
-            model: model,
-            contents: promptText,
-            config: {
-              systemInstruction: systemPrompt,
-              temperature: 0.7,
-            }
-          }),
-          AI_TIMEOUT
-        );
-        if (result && result.text) {
-          return result.text;
-        } else {
-          throw new Error("AI 返回空内容");
+  for (const model of MODEL_CANDIDATES) {
+    try {
+      const response = await ai.models.generateContent({
+        model: model,
+        contents: promptText,
+        config: {
+          systemInstruction: systemPrompt,
+          temperature: 0.7,
         }
-      } catch (err) {
-        lastError = err;
-        console.warn(`[AI] model=${model}, retry=${r} fail:`, err.message);
-        // 配额、密钥错误不再重试
-        if (err.message.includes("API key") || err.message.includes("quota") || err.message.includes("403")) {
-          throw err;
-        }
+      });
+      if (response && response.text) {
+        return response.text;
       }
+    } catch (err) {
+      lastError = err;
+      console.warn(`[RobustAI] Model ${model} failed:`, err.message);
     }
   }
-  throw lastError || new Error("所有AI模型调用失败");
+  throw lastError || new Error("所有备用 AI 模型调用均失败");
 }
-// ==========================================================
 
 app.get('/api/ai/status', (req, res) => {
-  res.json({ok:true,model:"gemini-2.5-flash (优先)",configured:!!apiKey&&!!ai});
+  res.json({ok:true,model:"gemini-2.5-flash (Robust)",configured:!!apiKey&&!!ai});
 });
 
 app.post('/api/ai/key',(req,res)=>{try{const key=String(req.body?.apiKey||'').trim();if(!key)return res.status(400).json({error:'请输入有效的 Key'});const e=encryptSecret(key);db.prepare(`INSERT INTO ai_secrets(id,encrypted_key,iv,auth_tag,updated_at) VALUES(1,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET encrypted_key=excluded.encrypted_key,iv=excluded.iv,auth_tag=excluded.auth_tag,updated_at=CURRENT_TIMESTAMP`).run(e.encrypted_key,e.iv,e.auth_tag);apiKey=key;ai=new GoogleGenAI({apiKey});res.json({ok:true,message:'API Key 保存成功'});}catch(err){res.status(500).json({error:err.message});}});
@@ -182,7 +160,7 @@ app.post('/api/ai/key',(req,res)=>{try{const key=String(req.body?.apiKey||'').tr
 app.post('/api/ai/key-test', async (req, res) => {
   try {
     if (!apiKey || !ai) return res.status(503).json({ ok: false, error: '未配置 Gemini API Key' });
-    const text = await callGeminiSafe('Reply OK', 'You are a helpful assistant.');
+    const text = await callGeminiRobust('Reply OK', 'You are a helpful assistant.');
     res.json({ ok: true, message: '连接成功', preview: String(text).slice(0, 50) });
   } catch (err) { res.status(502).json({ ok: false, error: err.message }); }
 });
@@ -274,28 +252,28 @@ app.get('/api/leads', (req, res) => {
 
 let isChatBusy = false;
 app.post('/api/ai/chat-reply', async (req, res) => {
-  if(isChatBusy){
-    return res.status(429).json({ok:false, error:"正在处理上一条消息，请稍后再发"});
+  if (isChatBusy) {
+    return res.status(429).json({ ok: false, error: "上一条消息还在处理中，请稍候..." });
   }
   isChatBusy = true;
-  try{
+  try {
     const { customer_phone, customer_message, platform } = req.body || {};
     const phone = String(customer_phone || "Web Visitor").trim();
     const message = String(customer_message || "").trim();
     if (!message) return res.status(400).json({ ok: false, error: "消息不能为空" });
-    if (!apiKey || !ai) return res.status(503).json({ ok: false, error: "未配置 Gemini API Key，请先在上方设置并保存 Key" });
+    if (!apiKey || !ai) return res.status(503).json({ ok: false, error: "未配置 Gemini API Key" });
 
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'customer', ?, ?)`).run(phone, platform || 'Website', message, new Date().toISOString());
     const cfg = db.prepare('SELECT system_prompt FROM ai_config WHERE id = 1').get();
 
-    const aiReply = await callGeminiSafe(message, cfg?.system_prompt || defaultPrompt);
+    const aiReply = await callGeminiRobust(message, cfg?.system_prompt || defaultPrompt);
 
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'ai', ?, ?)`).run(phone, platform || 'Website', aiReply, new Date().toISOString());
 
     res.json({ ok: true, ai_reply: aiReply, detected_language: "自动识别", auto_appointment_created: false, appointment_number: null });
-  }catch(err){
+  } catch (err) {
     res.status(502).json({ ok: false, error: "Gemini 响应失败: " + err.message });
-  }finally{
+  } finally {
     isChatBusy = false;
   }
 });
