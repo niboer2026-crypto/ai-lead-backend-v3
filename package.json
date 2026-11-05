@@ -1,12 +1,11 @@
 {
   "name": "ai-lead-master-crm",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "private": true,
-  "description": "AI Lead Master CRM with admin auth fixes, SQLite backups and Gemini assistant",
+  "description": "Dubai Beauty CRM & AI Lead Master",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "check": "node --check server.js"
+    "start": "node server.js"
   },
   "engines": {
     "node": "22.x"
