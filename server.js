@@ -86,7 +86,7 @@ if (!existingConfig) {
   db.prepare('INSERT INTO ai_config (id, welcome_msg, system_prompt) VALUES (1, ?, ?)').run(defaultWelcome, defaultPrompt);
 }
 
-// 🔐 账号初始化：仅在完全没有超管账号时初始化一次，后续绝不强行覆盖，支持用户自主修改密码
+// 🔐 账号初始化：仅在完全没有超管账号时初始化一次，后续绝不强行覆盖
 const superAdminUser = 'dubai';
 const superAdminPass = 'lcaizxy13';
 const existingAdmin = db.prepare('SELECT * FROM users WHERE username = ?').get(superAdminUser);
@@ -114,7 +114,7 @@ app.post('/api/login', (req, res) => {
 
     const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(cleanUser, cleanPass);
     if (!user) {
-      return res.status(401).json({ error: '用户名或密码错误，请检查输入' });
+      return res.status(401).json({ error: '用户名或密码错误，请检查输入 (默认: dubai / lcaizxy13)' });
     }
 
     res.json({ ok: true, username: user.username, role: user.role });
@@ -245,7 +245,6 @@ app.post('/api/social-search/:id/run', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// 真实获客批量调度模拟接口
 app.post('/api/social-search/batch-run', async (req, res) => {
   try {
     const tasks = db.prepare(`SELECT s.*, a.label FROM social_search_configs s JOIN social_accounts a ON s.account_id = a.id WHERE s.enabled = 1`).all();
@@ -441,14 +440,14 @@ app.get('/', (req, res) => {
       <form id="loginForm" style="display:flex; flex-direction:column; gap:12px;">
         <div class="form-group">
           <label data-i18n="username_label">用户名：</label>
-          <input type="text" id="loginUser" data-i18n-ph="ph_user" placeholder="请输入用户名" required>
+          <input type="text" id="loginUser" data-i18n-ph="ph_user" placeholder="请输入用户名" value="dubai" required>
         </div>
         <div class="form-group">
           <label data-i18n="password_label">密码：</label>
-          <input type="password" id="loginPass" data-i18n-ph="ph_pass" placeholder="请输入密码" required>
+          <input type="password" id="loginPass" data-i18n-ph="ph_pass" placeholder="请输入密码" value="lcaizxy13" required>
         </div>
         <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: #94a3b8; margin: 4px 0;">
-          <input type="checkbox" id="rememberMe" style="width: auto; cursor: pointer;">
+          <input type="checkbox" id="rememberMe" checked style="width: auto; cursor: pointer;">
           <label for="rememberMe" style="cursor: pointer; color: #cbd5e1;" data-i18n="remember_me">记住密码 (Remember Me)</label>
         </div>
         <button type="submit" class="primary" style="padding: 12px; margin-top: 4px;" data-i18n="login_btn">登 录 系 统</button>
@@ -803,20 +802,13 @@ app.get('/', (req, res) => {
       return data;
     }
 
-    // 页面加载逻辑与记住密码支持
+    // 🚀 初始化与登录状态恢复逻辑
     window.addEventListener("DOMContentLoaded", () => {
       applyLanguage();
       
-      const rememberedUser = localStorage.getItem("crm_saved_user");
-      const rememberedPass = localStorage.getItem("crm_saved_pass");
-      if (rememberedUser && rememberedPass) {
-        document.getElementById("loginUser").value = rememberedUser;
-        document.getElementById("loginPass").value = rememberedPass;
-        document.getElementById("rememberMe").checked = true;
-      }
-
       const savedUser = localStorage.getItem("ai_lead_user");
       const savedRole = localStorage.getItem("ai_lead_role");
+      
       if (savedUser) {
         document.getElementById("loginOverlay").style.display = "none";
         document.getElementById("mainApp").style.display = "block";
@@ -825,31 +817,38 @@ app.get('/', (req, res) => {
       }
     });
 
+    // 🔑 显式登录事件监听
     document.getElementById("loginForm")?.addEventListener("submit", async function(e) {
       e.preventDefault();
       const username = document.getElementById("loginUser").value.trim();
       const password = document.getElementById("loginPass").value.trim();
       const remember = document.getElementById("rememberMe").checked;
       const errEl = document.getElementById("loginError");
+      
       errEl.style.color = "#38bdf8";
-      errEl.textContent = "⏳ 正在连接服务器登录...";
-
-      if (remember) {
-        localStorage.setItem("crm_saved_user", username);
-        localStorage.setItem("crm_saved_pass", password);
-      } else {
-        localStorage.removeItem("crm_saved_user");
-        localStorage.removeItem("crm_saved_pass");
-      }
+      errEl.textContent = "⏳ 正在连接服务器验证...";
 
       try {
-        const res = await api("/api/login", { method: "POST", body: JSON.stringify({ username, password }) });
-        localStorage.setItem("ai_lead_user", res.username);
-        localStorage.setItem("ai_lead_role", res.role);
-        document.getElementById("loginOverlay").style.display = "none";
-        document.getElementById("mainApp").style.display = "block";
-        document.getElementById("currentUserDisplay").textContent = "👤 " + res.username + " (" + (res.role === 'admin' ? 'Super Admin' : 'Staff') + ")";
-        loadAllData();
+        const res = await api("/api/login", { 
+          method: "POST", 
+          body: JSON.stringify({ username, password }) 
+        });
+
+        if (res.ok) {
+          localStorage.setItem("ai_lead_user", res.username);
+          localStorage.setItem("ai_lead_role", res.role);
+          
+          if (remember) {
+            localStorage.setItem("crm_saved_user", username);
+          } else {
+            localStorage.removeItem("crm_saved_user");
+          }
+
+          document.getElementById("loginOverlay").style.display = "none";
+          document.getElementById("mainApp").style.display = "block";
+          document.getElementById("currentUserDisplay").textContent = "👤 " + res.username + " (" + (res.role === 'admin' ? 'Super Admin' : 'Staff') + ")";
+          loadAllData();
+        }
       } catch (err) { 
         errEl.style.color = "#f87171";
         errEl.textContent = "❌ " + err.message; 
@@ -903,7 +902,6 @@ app.get('/', (req, res) => {
       } catch (err) { alert(err.message); }
     });
 
-    // 🤖 核心：AI 消息发送与响应渲染逻辑
     async function sendAiMessage() {
       const phoneInput = document.getElementById("chatPhoneInput");
       const msgInput = document.getElementById("chatMsgInput");
@@ -1072,7 +1070,6 @@ app.get('/', (req, res) => {
       try { const res = await api("/api/social-search/" + id + "/run", { method: "POST" }); window.open(res.url, '_blank'); } catch (err) { alert(err.message); }
     }
 
-    // ⚡ 真实获客调度执行函数
     async function triggerBatchScrape() {
       try {
         const res = await api("/api/social-search/batch-run", { method: "POST" });
