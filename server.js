@@ -74,14 +74,14 @@ if (!existingAdmin) {
 
 app.use(express.json());
 
-// 初始化 Gemini 客户端
+// 初始化 Gemini 客户端 (自动从环境变量读取 GEMINI_API_KEY)
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 // API 路由：登录
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body || {};
   const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(String(username||"").trim(), String(password||"").trim());
-  if (!user) return res.status(401).json({ error: '用户名或密码错误' });
+  if (!user) return res.status(401).json({ error: '用户名或密码错误 / Invalid credentials' });
   res.json({ ok: true, username: user.username, role: user.role });
 });
 
@@ -192,7 +192,9 @@ app.post('/api/social-search/:id/run', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// Gemini AI 智能聊天与自动转预约接口
+// ==========================================
+// 🤖 核心升级：Gemini AI 智能聊天与结构化预约时间提取
+// ==========================================
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
   const phone = customer_phone || '+971 50 999 8888';
@@ -205,12 +207,17 @@ app.post('/api/ai/chat-reply', async (req, res) => {
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'customer', ?, ?)`).run(phone, platform || 'WhatsApp', customer_message, new Date().toISOString());
 
     const systemInstruction = `
-      You are a senior AI Sales Director for a high-end beauty brand in the Middle East (Dubai, Riyadh, Doha). 
-      Your goals:
-      1. Communicate in a professional, luxurious, and warm tone. Automatically adapt to the customer's language (English, Arabic, or Chinese).
-      2. Answer inquiries about beauty services or cross-border products accurately.
-      3. Proactively guide interested customers to book an appointment.
-      4. Keep responses concise and mobile-friendly.
+      You are a senior AI Sales Director for a high-end beauty brand in the Middle East (Dubai, Riyadh, Doha).
+      You must respond in strict JSON format with the following keys:
+      {
+        "reply": "Your warm, luxurious, professional reply to the customer in their language (English, Arabic, or Chinese).",
+        "has_booking_intent": true or false,
+        "appointment_date": "YYYY-MM-DD if mentioned or implied, otherwise null (current date is 2026-11-05)",
+        "appointment_time": "HH:MM (24-hour format) if mentioned or implied, otherwise '15:00'"
+      }
+      Rules:
+      1. If the customer wants to book or asks about booking/pricing, set "has_booking_intent" to true.
+      2. Carefully parse any date/time clues (e.g. tomorrow, next Monday, 下午3点) relative to 2026-11-05.
     `;
 
     const response = await ai.models.generateContent({
@@ -218,26 +225,43 @@ app.post('/api/ai/chat-reply', async (req, res) => {
       contents: `来自 [${platform || 'WhatsApp'}] 客户 (${phone}) 的咨询: "${customer_message}"`,
       config: {
         systemInstruction: systemInstruction,
-        temperature: 0.7,
+        temperature: 0.2,
+        responseMimeType: "application/json"
       }
     });
 
-    const aiReply = response.text ? response.text.trim() : "感谢您的咨询，请问有什么可以帮您的？";
+    let aiResult;
+    try {
+      aiResult = JSON.parse(response.text.trim());
+    } catch (e) {
+      aiResult = {
+        reply: response.text ? response.text.trim() : "感谢您的咨询，请问有什么可以帮您的？",
+        has_booking_intent: false,
+        appointment_date: null,
+        appointment_time: "15:00"
+      };
+    }
+
+    const aiReply = aiResult.reply;
 
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'ai', ?, ?)`).run(phone, platform || 'WhatsApp', aiReply, new Date().toISOString());
 
-    const lowerMsg = customer_message.toLowerCase();
     let autoAppointmentCreated = false;
     let apptNumber = null;
 
-    if (lowerMsg.includes('book') || lowerMsg.includes('appointment') || lowerMsg.includes('预约') || lowerMsg.includes('定个时间') || lowerMsg.includes('price')) {
+    if (aiResult.has_booking_intent) {
       apptNumber = 'APT-' + Date.now().toString().slice(-6);
-      const today = new Date().toISOString().split('T')[0];
+      const targetDate = aiResult.appointment_date || new Date().toISOString().split('T')[0];
+      const targetTime = aiResult.appointment_time || '15:00';
       
-      db.prepare(`INSERT INTO appointments (appointment_number, staff_id, phone, date, time, status, created_at) VALUES (?, 'AI Auto Agent', ?, ?, '15:00', 'Confirmed', ?)`).run(apptNumber, phone, today, new Date().toISOString());
+      db.prepare(`INSERT INTO appointments (appointment_number, staff_id, phone, date, time, status, created_at) VALUES (?, 'AI Smart Agent', ?, ?, ?, 'Confirmed', ?)`).run(
+        apptNumber, phone, targetDate, targetTime, new Date().toISOString()
+      );
       
       try {
-        db.prepare(`INSERT OR IGNORE INTO leads (id, name, phone, source, center, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run('LEAD-' + Date.now(), 'AI Converted Client', phone, `${platform || 'WhatsApp'} - AI Chat`, 'Dubai', new Date().toISOString());
+        db.prepare(`INSERT OR IGNORE INTO leads (id, name, phone, source, center, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(
+          'LEAD-' + Date.now(), 'AI Smart Client', phone, `${platform || 'WhatsApp'} - Smart AI Chat`, 'Dubai', new Date().toISOString()
+        );
       } catch(e){}
 
       autoAppointmentCreated = true;
@@ -248,7 +272,9 @@ app.post('/api/ai/chat-reply', async (req, res) => {
       customer_phone: phone,
       ai_reply: aiReply,
       auto_appointment_created: autoAppointmentCreated,
-      appointment_number: apptNumber
+      appointment_number: apptNumber,
+      extracted_date: aiResult.appointment_date,
+      extracted_time: aiResult.appointment_time
     });
 
   } catch (error) {
@@ -266,7 +292,7 @@ app.get('/api/ai/chat-logs', (req, res) => {
   }
 });
 
-// 前端网页界面（全响应式 + 手机优化 + 导航栏 + 中英双语一键切换）
+// 前端网页界面（全响应式 + 手机适配 + 导航栏 + 中英双语一键切换）
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="zh-CN">
@@ -404,7 +430,7 @@ app.get('/', (req, res) => {
 
     <div class="card" id="sec-ai-chat" style="border: 1px solid #0ea5e9;">
       <h3 style="color: #38bdf8;" data-i18n="ai_title">🤖 Gemini AI 智能客服与自动预约工作台</h3>
-      <p style="font-size: 12px; color: #94a3b8; margin-bottom: 12px;" data-i18n="ai_desc">消息中输入预约意向（如 book / price），Gemini 将自动回复并在后台直接生成预约单！</p>
+      <p style="font-size: 12px; color: #94a3b8; margin-bottom: 12px;" data-i18n="ai_desc">消息中输入预约意向（如 book / price），Gemini 将自动回复并在后台智能提取时间生成预约单！</p>
       
       <div class="chat-box" id="chatLogsContainer">
         <div class="msg ai" data-i18n="ai_welcome">👋 您好！我是中东美业旗舰店的 AI 销售顾问，请问有什么可以帮您的？</div>
@@ -412,7 +438,7 @@ app.get('/', (req, res) => {
 
       <div class="chat-input-group">
         <input type="text" id="chatPhoneInput" data-i18n-ph="ph_phone" placeholder="客户手机号" value="+971 50 123 4567" style="padding: 10px; background: #1e293b; border: 1px solid #475569; color:#fff; border-radius:8px;">
-        <input type="text" id="chatMsgInput" data-i18n-ph="ph_msg" placeholder="输入测试咨询 (如: Hi, I want to book a facial...)" style="padding: 10px; background: #1e293b; border: 1px solid #475569; color:#fff; border-radius:8px;" onkeypress="if(event.key==='Enter') sendAiMessage()">
+        <input type="text" id="chatMsgInput" data-i18n-ph="ph_msg" placeholder="输入测试咨询 (如: Hi, I want to book tomorrow at 3pm)" style="padding: 10px; background: #1e293b; border: 1px solid #475569; color:#fff; border-radius:8px;" onkeypress="if(event.key==='Enter') sendAiMessage()">
         <button class="primary" onclick="sendAiMessage()" style="width: auto; white-space: nowrap;" data-i18n="btn_send_ai">发送给 AI</button>
       </div>
     </div>
@@ -482,7 +508,6 @@ app.get('/', (req, res) => {
   </div>
 
   <script>
-    // 中英双语语言包 Dictionary
     const i18n = {
       zh: {
         login_title: "🔐 AI Lead Master 登录",
@@ -500,10 +525,10 @@ app.get('/', (req, res) => {
         nav_appts: "📅 预约列表",
         stat_total: "📦 总线索量",
         ai_title: "🤖 Gemini AI 智能客服与自动预约工作台",
-        ai_desc: "消息中输入预约意向（如 book / price），Gemini 将自动回复并在后台直接生成预约单！",
+        ai_desc: "消息中输入预约意向（如 book / price），Gemini 将自动回复并在后台智能提取时间生成预约单！",
         ai_welcome: "👋 您好！我是中东美业旗舰店的 AI 销售顾问，请问有什么可以帮您的？",
         ph_phone: "客户手机号",
-        ph_msg: "输入测试咨询 (如: Hi, I want to book a facial...)",
+        ph_msg: "输入测试咨询 (如: Hi, I want to book tomorrow at 3pm)",
         btn_send_ai: "发送给 AI",
         user_mgmt_title: "👑 超级管理员权限：员工 / 子账号管理",
         role_label: "角色：",
@@ -566,10 +591,10 @@ app.get('/', (req, res) => {
         nav_appts: "📅 Appointments",
         stat_total: "📦 Total Leads",
         ai_title: "🤖 Gemini AI Agent & Auto-Booking Workspace",
-        ai_desc: "Send messages with booking intent (e.g. book / price). Gemini auto-replies and creates appointments in SQLite!",
+        ai_desc: "Send messages with booking intent. Gemini auto-replies, extracts time, and creates appointments!",
         ai_welcome: "👋 Hello! I am your AI Sales Consultant for Middle East Beauty Brands. How can I assist you today?",
         ph_phone: "Customer Phone Number",
-        ph_msg: "Type test message (e.g. Hi, I want to book a facial...)",
+        ph_msg: "Type test message (e.g. Hi, I want to book tomorrow at 3pm)",
         btn_send_ai: "Send to AI",
         user_mgmt_title: "👑 Super Admin: Staff / Sub-Account Management",
         role_label: "Role:",
@@ -729,7 +754,7 @@ app.get('/', (req, res) => {
         container.scrollTop = container.scrollHeight;
 
         if (res.auto_appointment_created) {
-          const msgText = currentLang === 'en' ? \`🔥 AI captured booking intent! Generated Appointment: \${res.appointment_number}\` : \`🔥 AI 成功捕捉意向！自动生成预约单: \${res.appointment_number}\`;
+          const msgText = currentLang === 'en' ? \`🔥 AI captured intent! Created Booking [\${res.appointment_number}] for \${res.extracted_date || 'Today'} \${res.extracted_time || '15:00'}\` : \`🔥 AI 成功捕捉意向！已智能生成预约单 [\${res.appointment_number}]（时间: \${res.extracted_date || '今日'} \${res.extracted_time || '15:00'}）\`;
           alert(msgText);
           await loadAppointments();
           await loadStats();
@@ -801,7 +826,7 @@ app.get('/', (req, res) => {
       if (!tbody || !sel) return;
       try {
         const accs = await api("/api/social-accounts");
-        sel.innerHTML = `<option value="">${currentLang === 'en' ? 'Select Account' : '选择授权账号'}</option>`;
+        sel.innerHTML = \`<option value="">\${currentLang === 'en' ? 'Select Account' : '选择授权账号'}</option>\`;
         accs.forEach(a => {
           const opt = document.createElement("option");
           opt.value = a.id;
