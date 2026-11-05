@@ -2,119 +2,133 @@ const http = require('node:http');
 
 const PORT = process.env.PORT || 10000;
 
-// 模拟内存数据库（后续可以替换为真实数据库）
-const productsDB = [
-  { barcode: '6901234567890', name: '高级洗发水 500ml', price: 45.00, stock: 120 },
-  { barcode: '6909876543210', name: '精油美发护发素', price: 68.00, stock: 85 }
-];
+// 模拟数据库集合 (后续挂载至 Cloud Firestore)
+const apiCostLogsDB = []; // API 调用与成本日志
+const accountsDB = [];   // 多 WhatsApp / 平台账号
+const leadsDB = [];      // 统一 CRM 客户线索
+const appointmentsDB = []; // 预约记录
 
-const staffDB = [
-  { username: 'admin', pin: '8888', role: 'manager', branch: 'Main' },
-  { username: 'staff01', pin: '1234', role: 'cashier', branch: 'Branch-A' }
-];
+// 实用函数：API 成本记录工具
+function logApiUsage(service, endpoint, tokensOrUnits, estimatedCostUSD) {
+  const logEntry = {
+    id: 'LOG-' + Date.now(),
+    service, // 如 'Google Maps API', 'OpenAI API'
+    endpoint,
+    units: tokensOrUnits,
+    costUSD: estimatedCostUSD,
+    timestamp: new Date().toISOString()
+  };
+  apiCostLogsDB.push(logEntry);
+  console.log(`[API Cost Logged] ${service} - Cost: $${estimatedCostUSD}`);
+  return logEntry;
+}
 
 const server = http.createServer((req, res) => {
-  // 设置 CORS 跨域响应头
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-  // 处理预检请求 (OPTIONS)
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     res.end();
     return;
   }
 
-  // 1. 基础健康检查接口
+  // 1. 健康检查
   if (req.url === '/' || req.url === '/api/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ msg: 'Backend is running smoothly', ok: true }));
+    res.end(JSON.stringify({ msg: 'AI Lead Master Backend is active', ok: true }));
     return;
   }
 
-  // 2. 员工登录鉴权接口 (POST /api/auth/login)
-  if (req.url === '/api/auth/login' && req.method === 'POST') {
+  // 2. 管理员查看 API 成本与使用量看板数据 (GET /api/admin/api-costs)
+  if (req.url === '/api/admin/api-costs' && req.method === 'GET') {
+    const totalCost = apiCostLogsDB.reduce((sum, item) => sum + item.costUSD, 0);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: true,
+      totalCostUSD: Number(totalCost.toFixed(4)),
+      logsCount: apiCostLogsDB.length,
+      logs: apiCostLogsDB
+    }));
+    return;
+  }
+
+  // 3. 客户智能查重与新增接口 (POST /api/leads/add)
+  if (req.url === '/api/leads/add' && req.method === 'POST') {
     let body = '';
     req.on('data', chunk => { body += chunk.toString(); });
     req.on('end', () => {
       try {
-        const { username, pin } = JSON.parse(body || '{}');
-        const staff = staffDB.find(s => s.username === username && s.pin === pin);
+        const lead = JSON.parse(body || '{}');
+        // 校验必填字段与重复检测
+        const isDuplicate = leadsDB.some(l => l.phone === lead.phone && l.center === lead.center);
         
-        if (staff) {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ 
-            msg: 'Login successful', 
-            ok: true, 
-            data: { username: staff.username, role: staff.role, branch: staff.branch } 
-          }));
-        } else {
-          res.writeHead(401, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid username or PIN', ok: false }));
+        if (isDuplicate) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'Duplicate customer identified by phone number' }));
+          return;
         }
-      } catch (err) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid JSON', ok: false }));
-      }
-    });
-    return;
-  }
 
-  // 3. SmartPOS 扫码查询商品接口 (POST /api/pos/scan)
-  if (req.url === '/api/pos/scan' && req.method === 'POST') {
-    let body = '';
-    req.on('data', chunk => { body += chunk.toString(); });
-    req.on('end', () => {
-      try {
-        const { barcode } = JSON.parse(body || '{}');
-        const product = productsDB.find(p => p.barcode === barcode);
-
-        if (product) {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ msg: 'Product found', ok: true, data: product }));
-        } else {
-          res.writeHead(404, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Product not found', ok: false }));
-        }
-      } catch (err) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid JSON', ok: false }));
-      }
-    });
-    return;
-  }
-
-  // 4. SmartPOS 结算收银接口 (POST /api/pos/checkout)
-  if (req.url === '/api/pos/checkout' && req.method === 'POST') {
-    let body = '';
-    req.on('data', chunk => { body += chunk.toString(); });
-    req.on('end', () => {
-      try {
-        const { items, totalAmount, cashier } = JSON.parse(body || '{}');
-        
-        // 生成模拟订单号
-        const orderId = 'ORD-' + Date.now();
+        lead.id = 'LEAD-' + Date.now();
+        lead.createdAt = new Date().toISOString();
+        leadsDB.push(lead);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ 
-          msg: 'Checkout success', 
-          ok: true, 
-          data: { orderId, totalAmount, cashier, timestamp: new Date() } 
-        }));
+        res.end(JSON.stringify({ ok: true, msg: 'Lead saved successfully', data: lead }));
       } catch (err) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Checkout failed', ok: false }));
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
       }
     });
     return;
   }
 
-  // 未匹配到路由
+  // 4. 自动生成预约编号与时间冲突检查 (POST /api/appointments/create)
+  if (req.url === '/api/appointments/create' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk.toString(); });
+    req.on('end', () => {
+      try {
+        const apt = JSON.parse(body || '{}');
+        const dateStr = new Date().toISOString().slice(0,10).replace(/-/g,'');
+        const count = appointmentsDB.length + 1;
+        const aptNumber = `APT-${dateStr}-${String(count).padStart(3, '0')}`;
+
+        // 时间冲突检查
+        const hasConflict = appointmentsDB.some(
+          a => a.staffId === apt.staffId && a.date === apt.date && a.time === apt.time
+        );
+
+        if (hasConflict) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'Staff member time conflict detected' }));
+          return;
+        }
+
+        const newAppointment = {
+          ...apt,
+          appointmentNumber: aptNumber,
+          status: 'confirmed',
+          createdAt: new Date().toISOString()
+        };
+        appointmentsDB.push(newAppointment);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, msg: 'Appointment generated', data: newAppointment }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON' }));
+      }
+    });
+    return;
+  }
+
+  // 未匹配路由
   res.writeHead(404, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ error: 'Route not found', ok: false }));
+  res.end(JSON.stringify({ ok: false, error: 'Endpoint not found' }));
 });
 
 server.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
+  console.log(`AI Lead Master backend running on port ${PORT}`);
 });
