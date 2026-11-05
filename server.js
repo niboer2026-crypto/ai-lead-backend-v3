@@ -222,7 +222,7 @@ app.post('/api/social-search/:id/run', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// 🤖 Gemini AI 智能聊天与结构化预约时间提取（美业智能助理人设）
+// 🤖 Gemini AI 智能聊天与结构化预约时间提取（美业智能助理人设 - 已更新为 gemini-3.8-flash 模型）
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
   const phone = customer_phone || '+971 50 999 8888';
@@ -252,7 +252,7 @@ app.post('/api/ai/chat-reply', async (req, res) => {
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.8-flash',
       contents: `来自 [${platform || 'WhatsApp'}] 客户 (${phone}) 的咨询: "${customer_message}"`,
       config: {
         systemInstruction: systemInstruction,
@@ -266,7 +266,7 @@ app.post('/api/ai/chat-reply', async (req, res) => {
       aiResult = JSON.parse(response.text.trim());
     } catch (e) {
       aiResult = {
-        reply: response.text ? response.text.trim() : "感谢您的咨询，请问有什么我可以帮您的？",
+        reply: response.text ? response.text.trim() : "感谢您的咨询，请问有什么可以帮您的？",
         has_booking_intent: false,
         appointment_date: null,
         appointment_time: "15:00"
@@ -766,7 +766,7 @@ app.get('/', (req, res) => {
         localStorage.setItem("ai_lead_role", res.role);
         document.getElementById("loginOverlay").style.display = "none";
         document.getElementById("mainApp").style.display = "block";
-        document.getElementById("currentUserDisplay").textContent = \`👤 \${res.username} (\${res.role === 'admin' ? 'Super Admin' : 'Staff'})\`;
+        document.getElementById("currentUserDisplay").textContent = `👤 ${res.username} (${res.role === 'admin' ? 'Super Admin' : 'Staff'})`;
         loadAllData();
       } catch (err) { errEl.textContent = err.message; }
     });
@@ -784,7 +784,7 @@ app.get('/', (req, res) => {
       if (savedUser) {
         document.getElementById("loginOverlay").style.display = "none";
         document.getElementById("mainApp").style.display = "block";
-        document.getElementById("currentUserDisplay").textContent = \`👤 \${savedUser} (\${savedRole === 'admin' ? 'Super Admin' : 'Staff'})\`;
+        document.getElementById("currentUserDisplay").textContent = `👤 ${savedUser} (${savedRole === 'admin' ? 'Super Admin' : 'Staff'})`;
         loadAllData();
       }
     });
@@ -840,7 +840,7 @@ app.get('/', (req, res) => {
 
       const userDiv = document.createElement("div");
       userDiv.className = "msg customer";
-      userDiv.textContent = \`[\${phone}] \${message}\`;
+      userDiv.textContent = `[${phone}] ${message}`;
       container.appendChild(userDiv);
       msgInput.value = "";
       container.scrollTop = container.scrollHeight;
@@ -858,7 +858,7 @@ app.get('/', (req, res) => {
         container.scrollTop = container.scrollHeight;
 
         if (res.auto_appointment_created) {
-          const msgText = currentLang === 'en' ? \`🔥 Assistant captured booking! Created [\${res.appointment_number}] for \${res.extracted_date || 'Today'} \${res.extracted_time || '15:00'}\` : \`🔥 助理成功为您生成预约单！单号 [\${res.appointment_number}]（时间: \${res.extracted_date || '今日'} \${res.extracted_time || '15:00'}）\`;
+          const msgText = currentLang === 'en' ? `🔥 Assistant captured booking! Created [${res.appointment_number}] for ${res.extracted_date || 'Today'} ${res.extracted_time || '15:00'}` : `🔥 助理成功为您生成预约单！单号 [${res.appointment_number}]（时间: ${res.extracted_date || '今日'} ${res.extracted_time || '15:00'}）`;
           alert(msgText);
           await loadAppointments();
           await loadStats();
@@ -877,7 +877,7 @@ app.get('/', (req, res) => {
           logs.forEach(l => {
             const div = document.createElement("div");
             div.className = l.sender === 'ai' ? 'msg ai' : 'msg customer';
-            div.textContent = \`[\${l.customer_phone}] \${l.message}\`;
+            div.textContent = `[${l.customer_phone}] ${l.message}`;
             container.appendChild(div);
           });
           container.scrollTop = container.scrollHeight;
@@ -893,7 +893,7 @@ app.get('/', (req, res) => {
         tbody.innerHTML = "";
         users.forEach(u => {
           const tr = document.createElement("tr");
-          tr.innerHTML = \`<td>\${u.id}</td><td><b>\${u.username}</b></td><td><span style="color: \${u.role === 'admin' ? '#38bdf8' : '#a855f7'}; font-weight:bold;">\${u.role === 'admin' ? '👑 Admin' : '👤 Staff'}</span></td><td>\${u.created_at ? u.created_at.replace('T', ' ').slice(0, 16) : 'N/A'}</td><td>\${u.role !== 'admin' ? \`<button class="danger" style="padding: 4px 8px; font-size:12px;" onclick="deleteUser(\${u.id})">Delete</button>\` : '<span style="color:#64748b;">Main</span>'}</td>\`;
+          tr.innerHTML = `<td>${u.id}</td><td><b>${u.username}</b></td><td><span style="color: ${u.role === 'admin' ? '#38bdf8' : '#a855f7'}; font-weight:bold;">${u.role === 'admin' ? '👑 Admin' : '👤 Staff'}</span></td><td>${u.created_at ? u.created_at.replace('T', ' ').slice(0, 16) : 'N/A'}</td><td>${u.role !== 'admin' ? `<button class="danger" style="padding: 4px 8px; font-size:12px;" onclick="deleteUser(${u.id})">Delete</button>` : '<span style="color:#64748b;">Main</span>'}</td>`;
           tbody.appendChild(tr);
         });
       } catch (e) { console.error(e); }
@@ -911,7 +911,7 @@ app.get('/', (req, res) => {
 
     async function deleteUser(id) {
       if (!confirm("Confirm to delete?")) return;
-      try { await api(\`/api/admin/users/\${id}\`, { method: "DELETE" }); await loadUsersList(); } catch (err) { alert(err.message); }
+      try { await api(`/api/admin/users/${id}`, { method: "DELETE" }); await loadUsersList(); } catch (err) { alert(err.message); }
     }
 
     async function loadStats() {
@@ -930,12 +930,12 @@ app.get('/', (req, res) => {
       if (!tbody || !sel) return;
       try {
         const accs = await api("/api/social-accounts");
-        sel.innerHTML = \`<option value="">\${currentLang === 'en' ? 'Select Account' : '选择授权账号'}</option>\`;
+        sel.innerHTML = `<option value="">${currentLang === 'en' ? 'Select Account' : '选择授权账号'}</option>`;
         accs.forEach(a => {
           const opt = document.createElement("option");
           opt.value = a.id;
           opt.dataset.platform = a.platform;
-          opt.textContent = \`\${a.platform} - \${a.label}\`;
+          opt.textContent = `${a.platform} - ${a.label}`;
           sel.appendChild(opt);
         });
         tbody.innerHTML = "";
@@ -943,7 +943,7 @@ app.get('/', (req, res) => {
         accs.forEach(a => {
           const badgeClass = a.platform === 'Facebook' ? 'fb' : (a.platform === 'Instagram' ? 'ig' : 'tk');
           const tr = document.createElement("tr");
-          tr.innerHTML = \`<td>\${a.id}</td><td><span class="badge \${badgeClass}">\${a.platform}</span></td><td><b>\${a.label}</b></td><td><code>\${a.profile_id}</code></td><td>\${a.created_at ? a.created_at.replace('T', ' ').slice(0, 16) : 'N/A'}</td><td><button class="danger" style="padding: 4px 8px; font-size:12px;" onclick="deleteAccount(\${a.id})">Unbind</button></td>\`;
+          tr.innerHTML = `<td>${a.id}</td><td><span class="badge ${badgeClass}">${a.platform}</span></td><td><b>${a.label}</b></td><td><code>${a.profile_id}</code></td><td>${a.created_at ? a.created_at.replace('T', ' ').slice(0, 16) : 'N/A'}</td><td><button class="danger" style="padding: 4px 8px; font-size:12px;" onclick="deleteAccount(${a.id})">Unbind</button></td>`;
           tbody.appendChild(tr);
         });
       } catch (e) { console.error(e); }
@@ -961,7 +961,7 @@ app.get('/', (req, res) => {
 
     async function deleteAccount(id) {
       if (!confirm("Confirm to unbind?")) return;
-      try { await api(\`/api/social-accounts/\${id}\`, { method: "DELETE" }); await loadAccounts(); } catch (err) { alert(err.message); }
+      try { await api(`/api/social-accounts/${id}`, { method: "DELETE" }); await loadAccounts(); } catch (err) { alert(err.message); }
     }
 
     document.getElementById("ssAccount")?.addEventListener("change", function() {
@@ -978,7 +978,7 @@ app.get('/', (req, res) => {
         if (!tasks.length) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#64748b;">No Tasks</td></tr>'; return; }
         tasks.forEach(t => {
           const tr = document.createElement("tr");
-          tr.innerHTML = \`<td><b>\${t.platform}</b></td><td>ID: \${t.account_id}</td><td>\${t.country || 'Global'}</td><td>\${t.city || 'Any'}</td><td><code>\${t.keywords}</code></td><td>\${t.gender}</td><td><span style="color: \${t.enabled ? '#22c55e' : '#f87171'}; font-weight: bold;">\${t.enabled ? '● Active' : '○ Disabled'}</span></td><td style="display: flex; gap: 4px;"><button class="primary" style="padding: 4px 8px; font-size:12px;" onclick="runTask(\${t.id})">Run</button><button class="secondary" style="padding: 4px 8px; font-size:12px;" onclick="toggleTask(\${t.id}, \${t.enabled})">\${t.enabled ? 'Disable' : 'Enable'}</button><button class="danger" style="padding: 4px 8px; font-size:12px;" onclick="deleteTask(\${t.id})">Delete</button></td>\`;
+          tr.innerHTML = `<td><b>${t.platform}</b></td><td>ID: ${t.account_id}</td><td>${t.country || 'Global'}</td><td>${t.city || 'Any'}</td><td><code>${t.keywords}</code></td><td>${t.gender}</td><td><span style="color: ${t.enabled ? '#22c55e' : '#f87171'}; font-weight: bold;">${t.enabled ? '● Active' : '○ Disabled'}</span></td><td style="display: flex; gap: 4px;"><button class="primary" style="padding: 4px 8px; font-size:12px;" onclick="runTask(${t.id})">Run</button><button class="secondary" style="padding: 4px 8px; font-size:12px;" onclick="toggleTask(${t.id}, ${t.enabled})">${t.enabled ? 'Disable' : 'Enable'}</button><button class="danger" style="padding: 4px 8px; font-size:12px;" onclick="deleteTask(${t.id})">Delete</button></td>`;
           tbody.appendChild(tr);
         });
       } catch (e) { console.error(e); }
@@ -995,16 +995,16 @@ app.get('/', (req, res) => {
     });
 
     async function runTask(id) {
-      try { const res = await api(\`/api/social-search/\${id}/run\`, { method: "POST" }); alert(\`Search Target Launched:\n\${res.url}\`); } catch (err) { alert(err.message); }
+      try { const res = await api(`/api/social-search/${id}/run`, { method: "POST" }); alert(`Search Target Launched:\n${res.url}`); } catch (err) { alert(err.message); }
     }
 
     async function triggerBatchScrape() { alert("⚡ Auto Lead Scrape Command Triggered!"); loadStats(); }
     async function toggleTask(id, current) {
-      try { await api(\`/api/social-search/\${id}\`, { method: "PATCH", body: JSON.stringify({ enabled: !current }) }); await loadSearchTasks(); } catch (err) { alert(err.message); }
+      try { await api(`/api/social-search/${id}`, { method: "PATCH", body: JSON.stringify({ enabled: !current }) }); await loadSearchTasks(); } catch (err) { alert(err.message); }
     }
     async function deleteTask(id) {
       if (!confirm("Confirm to delete?")) return;
-      try { await api(\`/api/social-search/\${id}\`, { method: "DELETE" }); await loadSearchTasks(); } catch (err) { alert(err.message); }
+      try { await api(`/api/social-search/${id}`, { method: "DELETE" }); await loadSearchTasks(); } catch (err) { alert(err.message); }
     }
 
     async function loadAppointments() {
@@ -1017,7 +1017,7 @@ app.get('/', (req, res) => {
         appts.forEach(ap => {
           const tr = document.createElement("tr");
           const cleanPhone = ap.phone.replace(/[^0-9]/g, "");
-          tr.innerHTML = \`<td><b style="color:#38bdf8;">\${ap.appointment_number}</b></td><td>\${ap.staff_id}</td><td>\${ap.phone}</td><td>\${ap.date} \${ap.time}</td><td><span style="color: #22c55e; font-weight: bold;">\${ap.status}</span></td><td style="display: flex; gap: 4px;"><a href="https://wa.me/\${cleanPhone}" target="_blank"><button class="whatsapp" style="padding: 4px 8px; font-size:12px;">💬 WA</button></a><button class="danger" style="padding: 4px 8px; font-size:12px;" onclick="deleteAppt('\${ap.appointment_number}')">Cancel</button></td>\`;
+          tr.innerHTML = `<td><b style="color:#38bdf8;">${ap.appointment_number}</b></td><td>${ap.staff_id}</td><td>${ap.phone}</td><td>${ap.date} ${ap.time}</td><td><span style="color: #22c55e; font-weight: bold;">${ap.status}</span></td><td style="display: flex; gap: 4px;"><a href="https://wa.me/${cleanPhone}" target="_blank"><button class="whatsapp" style="padding: 4px 8px; font-size:12px;">💬 WA</button></a><button class="danger" style="padding: 4px 8px; font-size:12px;" onclick="deleteAppt('${ap.appointment_number}')">Cancel</button></td>`;
           tbody.appendChild(tr);
         });
       } catch (e) { console.error(e); }
@@ -1036,7 +1036,7 @@ app.get('/', (req, res) => {
 
     async function deleteAppt(no) {
       if (!confirm("Confirm to cancel?")) return;
-      try { await api(\`/api/appointments/\${no}\`, { method: "DELETE" }); await loadAppointments(); await loadStats(); } catch (err) { alert(err.message); }
+      try { await api(`/api/appointments/${no}`, { method: "DELETE" }); await loadAppointments(); await loadStats(); } catch (err) { alert(err.message); }
     }
   </script>
 </body>
