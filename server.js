@@ -193,7 +193,7 @@ app.post('/api/social-search/:id/run', async (req, res) => {
 });
 
 // ==========================================
-// 🤖 核心升级：Gemini AI 智能聊天与结构化预约时间提取
+// 🤖 Gemini AI 智能聊天与结构化预约时间提取
 // ==========================================
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
@@ -292,7 +292,7 @@ app.get('/api/ai/chat-logs', (req, res) => {
   }
 });
 
-// 前端网页界面（全响应式 + 手机适配 + 导航栏 + 中英双语一键切换）
+// 前端网页界面（全响应式 + 手机端适配 + 导航栏 + 中英双语切换）
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="zh-CN">
