@@ -6,6 +6,7 @@ const { GoogleGenAI } = require('@google/genai');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+// 初始化本地 SQLite 数据库 (自动生成 data.db文件)
 const db = new Database('data.db');
 
 db.exec(`
@@ -66,6 +67,18 @@ db.exec(`
   );
 `);
 
+// 🧹 自动清理机制：每次服务启动时，自动清理超过 7 天的旧聊天日志，保持数据库轻量高效
+try {
+  db.exec(`
+    DELETE FROM chat_logs 
+    WHERE datetime(created_at) < datetime('now', '-7 days');
+  `);
+  console.log("🧹 自动清理：已成功清理超过 7 天的旧聊天日志。");
+} catch (e) {
+  console.error("🧹 自动清理旧日志失败:", e.message);
+}
+
+// 初始默认 AI 欢迎词与提示词（美业专属智能助理）
 const defaultWelcome = "👋 您好！我是您的专属美业助理，请问有什么我可以帮您的？";
 const defaultPrompt = "You are a senior beauty consultant & personal assistant for a high-end beauty brand in the Middle East (Dubai, Riyadh, Doha). Professional, warm, and attentive. Never call yourself AI Sales.";
 
@@ -74,6 +87,7 @@ if (!existingConfig) {
   db.prepare('INSERT INTO ai_config (id, welcome_msg, system_prompt) VALUES (1, ?, ?)').run(defaultWelcome, defaultPrompt);
 }
 
+// 强制同步超管账号：dubai / lcaizxy13
 const superAdminUser = 'dubai';
 const superAdminPass = 'lcaizxy13';
 const existingAdmin = db.prepare('SELECT * FROM users WHERE username = ?').get(superAdminUser);
@@ -85,8 +99,10 @@ if (!existingAdmin) {
 
 app.use(express.json());
 
+// 初始化 Gemini 客户端
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
+// API 路由：登录
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body || {};
   const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(String(username||"").trim(), String(password||"").trim());
@@ -94,6 +110,7 @@ app.post('/api/login', (req, res) => {
   res.json({ ok: true, username: user.username, role: user.role });
 });
 
+// AI 配置读取与保存 API
 app.get('/api/ai/config', (req, res) => {
   try {
     const config = db.prepare('SELECT welcome_msg, system_prompt FROM ai_config WHERE id = 1').get();
@@ -216,6 +233,7 @@ app.post('/api/social-search/:id/run', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+// 🤖 Gemini AI 智能聊天与结构化预约时间提取
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
   const phone = customer_phone || '+971 50 999 8888';
