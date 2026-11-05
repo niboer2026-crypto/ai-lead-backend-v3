@@ -6,7 +6,7 @@ const PORT = process.env.PORT || 10000;
 
 // 内存数据库模拟 (后续挂载至 Cloud Firestore)
 const apiCostLogsDB = [];    // API 调用与成本日志
-const accountsDB = [];      // 多 WhatsApp / 平台账号
+const accountsDB = [];      // 多平台账号 (WhatsApp, FB, IG, TikTok)
 const leadsDB = [];         // 统一 CRM 客户线索
 const appointmentsDB = [];  // 预约记录
 
@@ -14,7 +14,7 @@ const appointmentsDB = [];  // 预约记录
 function logApiUsage(service, endpoint, tokensOrUnits, estimatedCostUSD) {
   const logEntry = {
     id: 'LOG-' + Date.now(),
-    service, // 例如: 'Google Maps API', 'OpenAI API'
+    service, // 例如: 'Facebook Leads API', 'TikTok Leads API', 'OpenAI API'
     endpoint,
     units: tokensOrUnits,
     costUSD: estimatedCostUSD,
@@ -78,8 +78,6 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const lead = JSON.parse(body || '{}');
-        
-        // 手机号与业务中心重复性拦截检测
         const isDuplicate = leadsDB.some(l => l.phone === lead.phone && l.center === lead.center);
         
         if (isDuplicate) {
@@ -92,7 +90,6 @@ const server = http.createServer((req, res) => {
         lead.createdAt = new Date().toISOString();
         leadsDB.push(lead);
 
-        // 模拟记录一次数据库/AI查重的微量成本
         logApiUsage('CRM Deduplication', '/api/leads/add', 1, 0.0001);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -105,7 +102,107 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 5. 自动生成预约编号与时间冲突检查 (POST /api/appointments/create)
+  // 5. Facebook 广告线索 Webhook 接收端 (POST /api/webhooks/facebook)
+  if (req.url === '/api/webhooks/facebook' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk.toString(); });
+    req.on('end', () => {
+      try {
+        const payload = JSON.parse(body || '{}');
+        // 解析 Facebook Lead Ads 传来的线索
+        const leadName = payload.name || 'FB User';
+        const leadPhone = payload.phone || 'Unknown';
+        
+        const isDuplicate = leadsDB.some(l => l.phone === leadPhone);
+        if (!isDuplicate && leadPhone !== 'Unknown') {
+          leadsDB.push({
+            id: 'LEAD-FB-' + Date.now(),
+            name: leadName,
+            phone: leadPhone,
+            source: 'Facebook Ads',
+            center: 'B2C',
+            createdAt: new Date().toISOString()
+          });
+        }
+        logApiUsage('Facebook Webhook', '/api/webhooks/facebook', 1, 0.0000);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ received: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Webhook parse error' }));
+      }
+    });
+    return;
+  }
+
+  // 6. TikTok 获客线索 Webhook 接收端 (POST /api/webhooks/tiktok)
+  if (req.url === '/api/webhooks/tiktok' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk.toString(); });
+    req.on('end', () => {
+      try {
+        const payload = JSON.parse(body || '{}');
+        const leadName = payload.name || 'TikTok User';
+        const leadPhone = payload.phone || 'Unknown';
+
+        const isDuplicate = leadsDB.some(l => l.phone === leadPhone);
+        if (!isDuplicate && leadPhone !== 'Unknown') {
+          leadsDB.push({
+            id: 'LEAD-TT-' + Date.now(),
+            name: leadName,
+            phone: leadPhone,
+            source: 'TikTok Ads',
+            center: 'B2C',
+            createdAt: new Date().toISOString()
+          });
+        }
+        logApiUsage('TikTok Webhook', '/api/webhooks/tiktok', 1, 0.0000);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ received: true }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Webhook parse error' }));
+      }
+    });
+    return;
+  }
+
+  // 7. Instagram 线索/私信同步端 (POST /api/webhooks/instagram)
+  if (req.url === '/api/webhooks/instagram' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk.toString(); });
+    req.on('end', () => {
+      try {
+        const payload = JSON.parse(body || '{}');
+        const leadName = payload.name || 'Instagram User';
+        const leadPhone = payload.phone || 'Unknown';
+
+        const isDuplicate = leadsDB.some(l => l.phone === leadPhone);
+        if (!isDuplicate && leadPhone !== 'Unknown') {
+          leadsDB.push({
+            id: 'LEAD-IG-' + Date.now(),
+            name: leadName,
+            phone: leadPhone,
+            source: 'Instagram Direct',
+            center: 'B2C',
+            createdAt: new Date().toISOString()
+          });
+        }
+        logApiUsage('Instagram Webhook', '/api/webhooks/instagram', 1, 0.0000);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ received: /true/i }));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Webhook parse error' }));
+      }
+    });
+    return;
+  }
+
+  // 8. 自动生成预约编号与时间冲突检查 (POST /api/appointments/create)
   if (req.url === '/api/appointments/create' && req.method === 'POST') {
     let body = '';
     req.on('data', chunk => { body += chunk.toString(); });
@@ -116,7 +213,6 @@ const server = http.createServer((req, res) => {
         const count = appointmentsDB.length + 1;
         const aptNumber = `APT-${dateStr}-${String(count).padStart(3, '0')}`;
 
-        // 时间冲突检查（同一员工在同一日期和时间段）
         const hasConflict = appointmentsDB.some(
           a => a.staffId === apt.staffId && a.date === apt.date && a.time === apt.time
         );
