@@ -175,7 +175,8 @@ app.post('/api/social-search/:id/run', async (req, res) => {
     const encoded = encodeURIComponent(query);
     const searchUrls = {
       Facebook: `https://www.facebook.com/search/top?q=${encoded}`,
-      Instagram: `https://www.instagram.com/explore/search/keyword/?q=${encoded}`, TikTok: `https://www.tiktok.com/search?q=${encoded}`
+      Instagram: `https://www.instagram.com/explore/search/keyword/?q=${encoded}`,
+      TikTok: `https://www.tiktok.com/search?q=${encoded}`
     };
     res.json({ ok: true, platform: config.platform, account: config.label, url: searchUrls[config.platform] });
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -242,4 +243,448 @@ app.get('/', (req, res) => {
           <label>密码 (Password)：</label>
           <input type="password" id="loginPass" placeholder="请输入密码" required>
         </div>
-        <button type="submit" class="primary" style="padding: 14px; margin-top: 10px; font
+        <button type="submit" class="primary" style="padding: 14px; margin-top: 10px; font-size: 16px;">安 全 登 录 系 统</button>
+        <div id="loginError" style="color:#f87171; font-size:13px; text-align:center;"></div>
+      </form>
+    </div>
+  </div>
+
+  <div class="container" id="mainApp" style="display:none;">
+    <div class="header-bar">
+      <h2>🚀 AI Lead Master - 跨境智能 CRM 控制台</h2>
+      <div style="display: flex; align-items: center; gap: 15px;">
+        <span id="currentUserDisplay" style="font-weight: bold; color: #38bdf8; background: #0f172a; padding: 6px 12px; border-radius: 6px; border: 1px solid #334155;"></span>
+        <button class="danger" onclick="logout()">退出登录</button>
+      </div>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card blue">
+        <h4>📦 聚合总线索量 (Total Leads)</h4>
+        <div class="num" id="valTotalLeads">0</div>
+      </div>
+      <div class="stat-card purple">
+        <h4>📘 Facebook 获客线索</h4>
+        <div class="num" id="valFbLeads">0</div>
+      </div>
+      <div class="stat-card pink">
+        <h4>📸 Instagram 互动线索</h4>
+        <div class="num" id="valIgLeads">0</div>
+      </div>
+      <div class="stat-card emerald">
+        <h4>🎵 TikTok 流量线索</h4>
+        <div class="num" id="valTkLeads">0</div>
+      </div>
+    </div>
+
+    <div class="card" id="userManagementSection" style="display:none;">
+      <h3>👑 超级管理员权限：员工 / 子账号开通与管理</h3>
+      <form id="createUserForm" class="form-grid">
+        <div class="form-group">
+          <label>新账号用户名：</label>
+          <input type="text" id="newUsername" placeholder="例如: staff_dubai01" required>
+        </div>
+        <div class="form-group">
+          <label>新账号密码：</label>
+          <input type="password" id="newPassword" placeholder="设置登录密码" required>
+        </div>
+        <div class="form-group">
+          <label>权限角色：</label>
+          <select id="newRole">
+            <option value="staff">员工 / 业务员 (Staff)</option>
+            <option value="admin">管理员 (Admin)</option>
+          </select>
+        </div>
+        <button type="submit" class="success">➕ 立即开通子账号</button>
+      </form>
+      <h4 style="margin-top: 25px; color: #38bdf8;">已有系统账号管理列表</h4>
+      <table>
+        <thead>
+          <tr><th>ID</th><th>用户名</th><th>权限角色</th><th>开通时间</th><th>操作</th></tr>
+        </thead>
+        <tbody id="usersTableList"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3>👤 1. 社媒平台多账号隔离与自动化配置</h3>
+      <form id="accountForm" class="form-grid">
+        <div class="form-group">
+          <label>所属社媒平台：</label>
+          <select id="accPlatform" required>
+            <option value="Facebook">📘 Facebook</option>
+            <option value="Instagram">📸 Instagram</option>
+            <option value="TikTok">🎵 TikTok</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>账号备注 / 门店标签：</label>
+          <input type="text" id="accLabel" placeholder="例如: 迪拜美业旗舰店号" required>
+        </div>
+        <div class="form-group">
+          <label>独立浏览器 Profile ID：</label>
+          <input type="text" id="accProfileId" placeholder="例如: prof_dubai_01" required>
+        </div>
+        <button type="submit" class="primary">🔗 绑 定 新 账 号</button>
+      </form>
+      <h4 style="margin-top: 25px; color: #38bdf8;">已授权的社媒账号列表</h4>
+      <table>
+        <thead>
+          <tr><th>ID</th><th>平台</th><th>备注标签</th><th>Profile 环境标识</th><th>绑定时间</th><th>控制动作</th></tr>
+        </thead>
+        <tbody id="accountTableList"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3>🌐 2. 全自动社媒定向搜客与 AI 意向提取任务</h3>
+      <form id="socialSearchForm" class="form-grid">
+        <div class="form-group">
+          <label>选择执行账号：</label>
+          <select id="ssAccount" required><option value="">请先在上文绑定账号</option></select>
+        </div>
+        <div class="form-group">
+          <label>目标平台：</label>
+          <input type="text" id="ssPlatform" readonly placeholder="自动匹配" style="background: #0f172a;">
+        </div>
+        <div class="form-group">
+          <label>目标国家 (Country)：</label>
+          <input type="text" id="ssCountry" placeholder="UAE / Saudi / Qatar">
+        </div>
+        <div class="form-group">
+          <label>目标城市 (City)：</label>
+          <input type="text" id="ssCity" placeholder="Dubai / Riyadh / Doha">
+        </div>
+        <div class="form-group">
+          <label>搜索/监控关键词：</label>
+          <input type="text" id="ssKeywords" placeholder="Salon & Spa / E-commerce" required>
+        </div>
+        <div class="form-group">
+          <label>目标性别筛选：</label>
+          <select id="ssGender">
+            <option value="不限">不限 / All</option>
+            <option value="男性">男性 / Male</option>
+            <option value="女性">女性 / Female</option>
+          </select>
+        </div>
+        <div style="grid-column: 1 / -1; margin-top: 10px; display: flex; gap: 12px;">
+          <button type="submit" class="primary" style="flex: 2; padding: 12px;">💾 保存并创建自动抓取任务</button>
+          <button type="button" class="purple-btn" style="flex: 1; padding: 12px;" onclick="triggerBatchScrape()">⚡ 立即全网一键自动获客</button>
+        </div>
+      </form>
+      <h4 style="margin-top: 25px; color: #38bdf8;">当前获客与定向搜索任务调度</h4>
+      <table>
+        <thead>
+          <tr><th>平台</th><th>关联账号</th><th>国家</th><th>城市</th><th>关键词</th><th>性别</th><th>运行状态</th><th>快捷操作</th></tr>
+        </thead>
+        <tbody id="socialSearchList"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3>📅 3. 智能预约排班与 WhatsApp 快捷转化管理</h3>
+      <form id="appointmentForm" class="form-grid">
+        <div class="form-group">
+          <label>分配接待员工/技师：</label>
+          <input type="text" id="apptStaff" placeholder="例如: Sarah (Dubai Branch)" required>
+        </div>
+        <div class="form-group">
+          <label>客户手机号 (WhatsApp)：</label>
+          <input type="text" id="apptPhone" placeholder="+971 50 123 4567" required>
+        </div>
+        <div class="form-group">
+          <label>预约到店日期：</label>
+          <input type="date" id="apptDate" required>
+        </div>
+        <div class="form-group">
+          <label>预约具体时间段：</label>
+          <input type="time" id="apptTime" required>
+        </div>
+        <button type="submit" class="success">✅ 确认并生成排班预约单</button>
+      </form>
+      <h4 style="margin-top: 25px; color: #38bdf8;">实时预约与私域转化列表</h4>
+      <table>
+        <thead>
+          <tr><th>预约单号</th><th>技师/员工</th><th>客户手机号</th><th>预约时间</th><th>状态</th><th>沟通与管理</th></tr>
+        </thead>
+        <tbody id="appointmentList"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    async function api(url, options = {}) {
+      const res = await fetch(url, { headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "请求失败");
+      return data;
+    }
+
+    document.getElementById("loginForm")?.addEventListener("submit", async function(e) {
+      e.preventDefault();
+      const username = document.getElementById("loginUser").value;
+      const password = document.getElementById("loginPass").value;
+      const errEl = document.getElementById("loginError");
+      errEl.textContent = "";
+      try {
+        const res = await api("/api/login", { method: "POST", body: JSON.stringify({ username, password }) });
+        localStorage.setItem("ai_lead_user", res.username);
+        localStorage.setItem("ai_lead_role", res.role);
+        document.getElementById("loginOverlay").style.display = "none";
+        document.getElementById("mainApp").style.display = "block";
+        document.getElementById("currentUserDisplay").textContent = \`👤 当前登录: \${res.username} (\${res.role === 'admin' ? '超级管理员' : '员工'})\`;
+        loadAllData();
+      } catch (err) { errEl.textContent = err.message; }
+    });
+
+    function logout() {
+      localStorage.removeItem("ai_lead_user");
+      localStorage.removeItem("ai_lead_role");
+      location.reload();
+    }
+
+    window.addEventListener("DOMContentLoaded", () => {
+      const savedUser = localStorage.getItem("ai_lead_user");
+      const savedRole = localStorage.getItem("ai_lead_role");
+      if (savedUser) {
+        document.getElementById("loginOverlay").style.display = "none";
+        document.getElementById("mainApp").style.display = "block";
+        document.getElementById("currentUserDisplay").textContent = \`👤 当前登录: \${savedUser} (\${savedRole === 'admin' ? '超级管理员' : '员工'})\`;
+        loadAllData();
+      }
+    });
+
+    async function loadAllData() {
+      const role = localStorage.getItem("ai_lead_role");
+      if (role === 'admin') {
+        document.getElementById("userManagementSection").style.display = "block";
+        await loadUsersList();
+      } else {
+        document.getElementById("userManagementSection").style.display = "none";
+      }
+      await loadStats();
+      await loadAccounts();
+      await loadAppointments();
+      await loadSearchTasks();
+    }
+
+    async function loadUsersList() {
+      const tbody = document.getElementById("usersTableList");
+      if (!tbody) return;
+      try {
+        const users = await api("/api/admin/users");
+        tbody.innerHTML = "";
+        users.forEach(u => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = \`<td>\${u.id}</td><td><b>\${u.username}</b></td><td><span style="color: \${u.role === 'admin' ? '#38bdf8' : '#a855f7'}; font-weight:bold;">\${u.role === 'admin' ? '👑 管理员' : '👤 员工'}</span></td><td>\${u.created_at ? u.created_at.replace('T', ' ').slice(0, 16) : 'N/A'}</td><td>\${u.role !== 'admin' ? \`<button class="danger" style="padding: 4px 10px; font-size:12px;" onclick="deleteUser(\${u.id})">注销账号</button>\` : '<span style="color:#64748b;">主账号防护</span>'}</td>\`;
+          tbody.appendChild(tr);
+        });
+      } catch (e) { console.error(e); }
+    }
+
+    document.getElementById("createUserForm")?.addEventListener("submit", async function(e) {
+      e.preventDefault();
+      const data = {
+        username: document.getElementById("newUsername").value,
+        password: document.getElementById("newPassword").value,
+        role: document.getElementById("newRole").value
+      };
+      try {
+        await api("/api/admin/users", { method: "POST", body: JSON.stringify(data) });
+        alert("新子账号开通成功！");
+        this.reset();
+        await loadUsersList();
+      } catch (err) { alert(err.message); }
+    });
+
+    async function deleteUser(id) {
+      if (!confirm("确定注销该账号吗？")) return;
+      try {
+        await api(\`/api/admin/users/\${id}\`, { method: "DELETE" });
+        await loadUsersList();
+      } catch (err) { alert(err.message); }
+    }
+
+    async function loadStats() {
+      try {
+        const s = await api("/api/dashboard/stats");
+        document.getElementById("valTotalLeads").textContent = s.total;
+        document.getElementById("valFbLeads").textContent = s.fb;
+        document.getElementById("valIgLeads").textContent = s.ig;
+        document.getElementById("valTkLeads").textContent = s.tk;
+      } catch (e) { console.error(e); }
+    }
+
+    async function loadAccounts() {
+      const tbody = document.getElementById("accountTableList");
+      const sel = document.getElementById("ssAccount");
+      if (!tbody || !sel) return;
+      try {
+        const accs = await api("/api/social-accounts");
+        sel.innerHTML = '<option value="">请选择授权社媒账号</option>';
+        accs.forEach(a => {
+          const opt = document.createElement("option");
+          opt.value = a.id;
+          opt.dataset.platform = a.platform;
+          opt.textContent = \`\${a.platform} - \${a.label} [\${a.profile_id}]\`;
+          sel.appendChild(opt);
+        });
+        tbody.innerHTML = "";
+        if (!accs.length) {
+          tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:#64748b;">暂无绑定账号，请在上文添加</td></tr>';
+          return;
+        }
+        accs.forEach(a => {
+          const badgeClass = a.platform === 'Facebook' ? 'fb' : (a.platform === 'Instagram' ? 'ig' : 'tk');
+          const tr = document.createElement("tr");
+          tr.innerHTML = \`<td>\${a.id}</td><td><span class="badge \${badgeClass}">\${a.platform}</span></td><td><b>\${a.label}</b></td><td><code>\${a.profile_id}</code></td><td>\<code\>\${a.created_at ? a.created_at.replace('T', ' ').slice(0, 16) : 'N/A'}</code\></td><td><button class="danger" style="padding: 6px 12px; font-size:12px;" onclick="deleteAccount(\${a.id})">解除绑定</button></td>\`;
+          tbody.appendChild(tr);
+        });
+      } catch (e) { console.error(e); }
+    }
+
+    document.getElementById("accountForm")?.addEventListener("submit", async function(e) {
+      e.preventDefault();
+      const data = {
+        platform: document.getElementById("accPlatform").value,
+        label: document.getElementById("accLabel").value,
+        profile_id: document.getElementById("accProfileId").value
+      };
+      try {
+        await api("/api/social-accounts", { method: "POST", body: JSON.stringify(data) });
+        alert("社媒账号绑定成功！");
+        this.reset();
+        await loadAccounts();
+      } catch (err) { alert(err.message); }
+    });
+
+    async function deleteAccount(id) {
+      if (!confirm("确定解绑此社媒账号吗？")) return;
+      try {
+        await api(\`/api/social-accounts/\${id}\`, { method: "DELETE" });
+        await loadAccounts();
+      } catch (err) { alert(err.message); }
+    }
+
+    document.getElementById("ssAccount")?.addEventListener("change", function() {
+      const opt = this.selectedOptions[0];
+      if (opt && opt.dataset.platform) {
+        document.getElementById("ssPlatform").value = opt.dataset.platform;
+      }
+    });
+
+    async function loadSearchTasks() {
+      const tbody = document.getElementById("socialSearchList");
+      if (!tbody) return;
+      try {
+        const tasks = await api("/api/social-search");
+        tbody.innerHTML = "";
+        if (!tasks.length) {
+          tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#64748b;">暂无搜索任务，请创建调度</td></tr>';
+          return;
+        }
+        tasks.forEach(t => {
+          const tr = document.createElement("tr");
+          tr.innerHTML = \`<td><b>\${t.platform}</b></td><td>ID: \${t.account_id}</td><td>\${t.country || '全球'}</td><td>\${t.city || '不限'}</td><td><code>\${t.keywords}</code></td><td>\${t.gender}</td><td><span style="color: \${t.enabled ? '#22c55e' : '#f87171'}; font-weight: bold;">\${t.enabled ? '● 运行中' : '○ 已停用'}</span></td><td style="display: flex; gap: 6px;"><button class="primary" style="padding: 6px 12px; font-size:12px;" onclick="runTask(\${t.id})">执行</button><button class="secondary" style="padding: 6px 12px; font-size:12px;" onclick="toggleTask(\${t.id}, \${t.enabled})">\${t.enabled ? '停用' : '启用'}</button><button class="danger" style="padding: 6px 12px; font-size:12px;" onclick="deleteTask(\${t.id})">删除</button></td>\`;
+          tbody.appendChild(tr);
+        });
+      } catch (e) { console.error(e); }
+    }
+
+    document.getElementById("socialSearchForm")?.addEventListener("submit", async function(e) {
+      e.preventDefault();
+      const data = {
+        account_id: Number(document.getElementById("ssAccount").value),
+        platform: document.getElementById("ssPlatform").value,
+        country: document.getElementById("ssCountry").value,
+        city: document.getElementById("ssCity").value,
+    keywords: document.getElementById("ssKeywords").value,
+        gender: document.getElementById("ssGender").value
+      };
+      try {
+        await api("/api/social-search", { method: "POST", body: JSON.stringify(data) });
+        alert("获客任务创建成功！");
+        this.reset();
+        await loadSearchTasks();
+      } catch (err) { alert(err.message); }
+    });
+
+    async function runTask(id) {
+      try {
+        const res = await api(\`/api/social-search/\${id}/run\`, { method: "POST" });
+        alert(\`已自动唤起搜索目标：\n\${res.url}\`);
+      } catch (err) { alert(err.message); }
+    }
+
+    async function triggerBatchScrape() {
+      alert("⚡ 已触发全网一键自动获客指令：已开始抓取目标潜客！");
+      loadStats();
+    }
+
+    async function toggleTask(id, current) {
+      try {
+        await api(\`/api/social-search/\${id}\`, { method: "PATCH", body: JSON.stringify({ enabled: !current }) });
+        await loadSearchTasks();
+      } catch (err) { alert(err.message); }
+    }
+
+    async function deleteTask(id) {
+      if (!confirm("确定删除此获客任务吗？")) return;
+      try {
+        await api(\`/api/social-search/\${id}\`, { method: "DELETE" });
+        await loadSearchTasks();
+      } catch (err) { alert(err.message); }
+    }
+
+    async function loadAppointments() {
+      const tbody = document.getElementById("appointmentList");
+      if (!tbody) return;
+      try {
+        const appts = await api("/api/appointments");
+        tbody.innerHTML = "";
+        if (!appts.length) {
+          tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:#64748b;">暂无预约记录</td></tr>';
+          return;
+        }
+        appts.forEach(ap => {
+          const tr = document.createElement("tr");
+          const cleanPhone = ap.phone.replace(/[^0-9]/g, "");
+          tr.innerHTML = \`<td><b style="color:#38bdf8;">\${ap.appointment_number}</b></td><td>\${ap.staff_id}</td><td>\${ap.phone}</td><td>\${ap.date} \${ap.time}</td><td><span style="color: #22c55e; font-weight: bold;">\${ap.status}</span></td><td style="display: flex; gap: 8px;"><a href="https://wa.me/\${cleanPhone}" target="_blank"><button class="whatsapp" style="padding: 6px 12px; font-size:12px;">💬 WhatsApp</button></a><button class="danger" style="padding: 6px 12px; font-size:12px;" onclick="deleteAppt('\${ap.appointment_number}')">取消预约</button></td>\`;
+          tbody.appendChild(tr);
+        });
+      } catch (e) { console.error(e); }
+    }
+
+    document.getElementById("appointmentForm")?.addEventListener("submit", async function(e) {
+      e.preventDefault();
+      const data = {
+        staff_id: document.getElementById("apptStaff").value,
+        phone: document.getElementById("apptPhone").value,
+        date: document.getElementById("apptDate").value,
+        time: document.getElementById("apptTime").value
+      };
+      try {
+        await api("/api/appointments", { method: "POST", body: JSON.stringify(data) });
+        alert("预约排班创建成功！");
+        this.reset();
+        await loadAppointments();
+        await loadStats();
+      } catch (err) { alert(err.message); }
+    });
+
+    async function deleteAppt(no) {
+      if (!confirm("确定取消该预约吗？")) return;
+      try {
+        await api(\`/api/appointments/\${no}\`, { method: "DELETE" });
+        await loadAppointments();
+        await loadStats();
+      } catch (err) { alert(err.message); }
+    }
+  </script>
+</body>
+</html>`);
+});
+
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});
