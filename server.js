@@ -18,88 +18,255 @@ const defaultHtml = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AI Lead Master - 智能 CRM 与安全控制台</title>
+  <title>AI Lead Master - 智能跨境 CRM 控制台</title>
   <style>
     * { box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f6f9; margin: 0; padding: 20px; color: #333; }
-    .container { max-width: 1300px; margin: 0 auto; background: #fff; padding: 25px; border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); }
-    .header-bar { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #e8eaed; padding-bottom: 12px; margin-bottom: 20px; }
-    h2 { color: #1a73e8; margin: 0; }
-    .card { background: #fafbfc; border: 1px solid #e1e4e8; border-radius: 8px; padding: 20px; margin-bottom: 24px; }
-    h3 { color: #2d3748; margin-top: 0; border-bottom: 1px solid #edf2f7; padding-bottom: 8px; }
-    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; align-items: end; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; margin: 0; padding: 20px; color: #f8fafc; }
+    .container { max-width: 1400px; margin: 0 auto; background: #1e293b; padding: 30px; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid #334155; }
+    .header-bar { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #334155; padding-bottom: 15px; margin-bottom: 25px; }
+    h2 { color: #38bdf8; margin: 0; font-size: 24px; }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px; margin-bottom: 30px; }
+    .stat-card { padding: 20px; border-radius: 12px; color: #fff; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+    .stat-card.blue { background: linear-gradient(135deg, #3b82f6, #1d4ed8); }
+    .stat-card.purple { background: linear-gradient(135deg, #a855f7, #6b21a8); }
+    .stat-card.pink { background: linear-gradient(135deg, #ec4899, #be185d); }
+    .stat-card.emerald { background: linear-gradient(135deg, #10b981, #047857); }
+    .stat-card h4 { margin: 0 0 10px 0; font-size: 14px; text-transform: uppercase; }
+    .stat-card .num { font-size: 32px; font-weight: bold; }
+
+    .card { background: #0f172a; border: 1px solid #334155; border-radius: 12px; padding: 24px; margin-bottom: 25px; }
+    h3 { color: #f1f5f9; margin-top: 0; border-bottom: 2px solid #334155; padding-bottom: 10px; font-size: 18px; }
+    
+    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 18px; align-items: end; }
     .form-group { display: flex; flex-direction: column; gap: 6px; }
-    .form-group label { font-weight: 600; font-size: 13px; color: #4a5568; }
-    .form-group input, .form-group select { padding: 9px 12px; border: 1px solid #cbd5e0; border-radius: 6px; font-size: 14px; outline: none; }
-    button { padding: 9px 16px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 14px; transition: background 0.2s; }
-    button.primary { background: #3182ce; color: #fff; }
-    button.primary:hover { background: #2b6cb0; }
-    button.secondary { background: #718096; color: #fff; }
-    button.danger { background: #e53e3e; color: #fff; }
-    button.whatsapp { background: #25d366; color: #fff; }
+    .form-group label { font-weight: 600; font-size: 13px; color: #94a3b8; }
+    .form-group input, .form-group select { padding: 10px 14px; background: #1e293b; border: 1px solid #475569; color: #f8fafc; border-radius: 8px; font-size: 14px; outline: none; }
+
+    button { padding: 10px 18px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 14px; transition: transform 0.1s; }
+    button:active { transform: scale(0.97); }
+    button.primary { background: linear-gradient(135deg, #0ea5e9, #0284c7); color: #fff; }
+    button.secondary { background: linear-gradient(135deg, #64748b, #475569); color: #fff; }
+    button.success { background: linear-gradient(135deg, #22c55e, #15803d); color: #fff; }
+    button.danger { background: linear-gradient(135deg, #ef4444, #b91c1c); color: #fff; }
+    button.whatsapp { background: linear-gradient(135deg, #25d366, #128c7e); color: #fff; }
+    button.purple-btn { background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: #fff; }
+
     table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
-    th, td { border: 1px solid #e2e8f0; padding: 12px; text-align: left; }
-    th { background-color: #edf2f7; font-weight: 600; color: #2d3748; }
-    tr:nth-child(even) { background-color: #f8fafc; }
-    /* 登录浮层样式 */
-    #loginOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); display: flex; justify-content: center; align-items: center; z-index: 9999; }
-    .login-box { background: #fff; padding: 30px; border-radius: 10px; width: 350px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+    th, td { border: 1px solid #334155; padding: 14px; text-align: left; }
+    th { background-color: #1e293b; font-weight: 600; color: #38bdf8; text-transform: uppercase; font-size: 12px; }
+    tr:nth-child(even) { background-color: rgba(30, 41, 59, 0.4); }
+
+    #loginOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15,23,42,0.95); display: flex; justify-content: center; align-items: center; z-index: 9999; backdrop-filter: blur(8px); }
+    .login-box { background: #1e293b; padding: 40px; border-radius: 16px; width: 380px; border: 1px solid #334155; box-shadow: 0 15px 35px rgba(0,0,0,0.6); }
+    .badge { padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: bold; display: inline-block; }
+    .badge.fb { background: #1d4ed8; color: #bfdbfe; }
+    .badge.ig { background: #be185d; color: #fce7f3; }
+    .badge.tk { background: #374151; color: #f3f4f6; border: 1px solid #6b7280; }
   </style>
 </head>
 <body>
 
-  <!-- 登录拦截遮罩 -->
+  <!-- 登录拦截遮罩 (已移除提示) -->
   <div id="loginOverlay">
     <div class="login-box">
-      <h3 style="text-align:center; color:#1a73e8; margin-bottom:20px;">🔐 AI Lead Master 登录</h3>
-      <form id="loginForm" style="display:flex; flex-direction:column; gap:15px;">
+      <h3 style="text-align:center; color:#38bdf8; margin-bottom:25px; font-size: 22px;">🔐 AI Lead Master 登录</h3>
+      <form id="loginForm" style="display:flex; flex-direction:column; gap:18px;">
         <div class="form-group">
           <label>用户名 (Username)：</label>
-          <input type="text" id="loginUser" placeholder="admin" required>
+          <input type="text" id="loginUser" placeholder="请输入用户名" required>
         </div>
         <div class="form-group">
           <label>密码 (Password)：</label>
-          <input type="password" id="loginPass" placeholder="admin123" required>
+          <input type="password" id="loginPass" placeholder="请输入密码" required>
         </div>
-        <button type="submit" class="primary" style="padding: 12px; margin-top: 5px;">安全登录系统</button>
-        <div id="loginError" style="color:red; font-size:13px; text-align:center;"></div>
+        <button type="submit" class="primary" style="padding: 14px; margin-top: 10px; font-size: 16px;">安 全 登 录 系 统</button>
+        <div id="loginError" style="color:#f87171; font-size:13px; text-align:center;"></div>
       </form>
     </div>
   </div>
 
-  <!-- 主控制台界面 (登录后可见) -->
+  <!-- 主控制台界面 -->
   <div class="container" id="mainApp" style="display:none;">
     <div class="header-bar">
       <h2>🚀 AI Lead Master - 跨境智能 CRM 控制台</h2>
-      <div>
-        <span id="currentUserDisplay" style="margin-right: 15px; font-weight: bold; color: #4a5568;"></span>
-        <button class="danger" onclick="logout()" style="padding: 6px 12px;">退出登录</button>
+      <div style="display: flex; align-items: center; gap: 15px;">
+        <span id="currentUserDisplay" style="font-weight: bold; color: #38bdf8; background: #0f172a; padding: 6px 12px; border-radius: 6px; border: 1px solid #334155;"></span>
+        <button class="danger" onclick="logout()">退出登录</button>
       </div>
     </div>
 
-    <!-- 1. 智能预约管理模块 -->
-    <div class="card">
-      <h3>📅 智能预约与排班管理系统</h3>
-      <form id="appointmentForm" class="form-grid">
+    <!-- 顶部数据看板 -->
+    <div class="stats-grid">
+      <div class="stat-card blue">
+        <h4>📦 聚合总线索量 (Total Leads)</h4>
+        <div class="num" id="valTotalLeads">0</div>
+      </div>
+      <div class="stat-card purple">
+        <h4>📘 Facebook 获客线索</h4>
+        <div class="num" id="valFbLeads">0</div>
+      </div>
+      <div class="stat-card pink">
+        <h4>📸 Instagram 互动线索</h4>
+        <div class="num" id="valIgLeads">0</div>
+      </div>
+      <div class="stat-card emerald">
+        <h4>🎵 TikTok 流量线索</h4>
+        <div class="num" id="valTkLeads">0</div>
+      </div>
+    </div>
+
+    <!-- 0. 超级管理员：员工/子账号开通管理模块 -->
+    <div class="card" id="userManagementSection" style="display:none;">
+      <h3>👑 超级管理员权限：员工 / 子账号开通与管理</h3>
+      <form id="createUserForm" class="form-grid">
         <div class="form-group">
-          <label>分配员工 / 技师：</label>
-          <input type="text" id="apptStaff" placeholder="例如: Sarah" required>
+          <label>新账号用户名：</label>
+          <input type="text" id="newUsername" placeholder="例如: staff_dubai01" required>
         </div>
         <div class="form-group">
-          <label>客户手机号：</label>
+          <label>新账号密码：</label>
+          <input type="password" id="newPassword" placeholder="设置登录密码" required>
+        </div>
+        <div class="form-group">
+          <label>权限角色：</label>
+          <select id="newRole">
+            <option value="staff">员工 / 业务员 (Staff)</option>
+            <option value="admin">管理员 (Admin)</option>
+          </select>
+        </div>
+        <button type="submit" class="success">➕ 立即开通子账号</button>
+      </form>
+      <h4 style="margin-top: 25px; color: #38bdf8;">已有系统账号管理列表</h4>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>用户名</th>
+            <th>权限角色</th>
+            <th>开通时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="usersTableList"></tbody>
+      </table>
+    </div>
+
+    <!-- 1. 社媒账号绑定区 -->
+    <div class="card">
+      <h3>👤 1. 社媒平台多账号隔离与自动化配置</h3>
+      <form id="accountForm" class="form-grid">
+        <div class="form-group">
+          <label>所属社媒平台：</label>
+          <select id="accPlatform" required>
+            <option value="Facebook">📘 Facebook</option>
+            <option value="Instagram">📸 Instagram</option>
+            <option value="TikTok">🎵 TikTok</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>账号备注 / 门店标签：</label>
+          <input type="text" id="accLabel" placeholder="例如: 迪拜美业旗舰店号" required>
+        </div>
+        <div class="form-group">
+          <label>独立浏览器 Profile ID：</label>
+          <input type="text" id="accProfileId" placeholder="例如: prof_dubai_01" required>
+        </div>
+        <button type="submit" class="primary">🔗 绑 定 新 账 号</button>
+      </form>
+      <h4 style="margin-top: 25px; color: #38bdf8;">已授权的社媒账号列表</h4>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>平台</th>
+            <th>备注标签</th>
+            <th>Profile 环境标识</th>
+            <th>绑定时间</th>
+            <th>控制动作</th>
+          </tr>
+        </thead>
+        <tbody id="accountTableList"></tbody>
+      </table>
+    </div>
+
+    <!-- 2. 全自动搜客任务 -->
+    <div class="card">
+      <h3>🌐 2. 全自动社媒定向搜客与 AI 意向提取任务</h3>
+      <form id="socialSearchForm" class="form-grid">
+        <div class="form-group">
+          <label>选择执行账号：</label>
+          <select id="ssAccount" required><option value="">请先在上文绑定账号</option></select>
+        </div>
+        <div class="form-group">
+          <label>目标平台：</label>
+          <input type="text" id="ssPlatform" readonly placeholder="自动匹配" style="background: #0f172a;">
+        </div>
+        <div class="form-group">
+          <label>目标国家 (Country)：</label>
+          <input type="text" id="ssCountry" placeholder="UAE / Saudi / Qatar">
+        </div>
+        <div class="form-group">
+          <label>目标城市 (City)：</label>
+          <input type="text" id="ssCity" placeholder="Dubai / Riyadh / Doha">
+        </div>
+        <div class="form-group">
+          <label>搜索/监控关键词：</label>
+          <input type="text" id="ssKeywords" placeholder="Salon & Spa / E-commerce" required>
+        </div>
+        <div class="form-group">
+          <label>目标性别筛选：</label>
+          <select id="ssGender">
+            <option value="不限">不限 / All</option>
+            <option value="男性">男性 / Male</option>
+            <option value="女性">女性 / Female</option>
+          </select>
+        </div>
+        <div style="grid-column: 1 / -1; margin-top: 10px; display: flex; gap: 12px;">
+          <button type="submit" class="primary" style="flex: 2; padding: 12px;">💾 保存并创建自动抓取任务</button>
+          <button type="button" class="purple-btn" style="flex: 1; padding: 12px;" onclick="triggerBatchScrape()">⚡ 立即全网一键自动获客</button>
+        </div>
+      </form>
+      <h4 style="margin-top: 25px; color: #38bdf8;">当前获客与定向搜索任务调度</h4>
+      <table>
+        <thead>
+          <tr>
+            <th>平台</th>
+            <th>关联账号</th>
+            <th>国家</th>
+            <th>城市</th>
+            <th>关键词</th>
+            <th>性别</th>
+            <th>运行状态</th>
+            <th>快捷操作</th>
+          </tr>
+        </thead>
+        <tbody id="socialSearchList"></tbody>
+      </table>
+    </div>
+
+    <!-- 3. 预约与转化列表 -->
+    <div class="card">
+      <h3>📅 3. 智能预约排班与 WhatsApp 快捷转化管理</h3>
+      <form id="appointmentForm" class="form-grid">
+        <div class="form-group">
+          <label>分配接待员工/技师：</label>
+          <input type="text" id="apptStaff" placeholder="例如: Sarah (Dubai Branch)" required>
+        </div>
+        <div class="form-group">
+          <label>客户手机号 (WhatsApp)：</label>
           <input type="text" id="apptPhone" placeholder="+971 50 123 4567" required>
         </div>
         <div class="form-group">
-          <label>预约日期：</label>
+          <label>预约到店日期：</label>
           <input type="date" id="apptDate" required>
         </div>
         <div class="form-group">
-          <label>预约时间段：</label>
+          <label>预约具体时间段：</label>
           <input type="time" id="apptTime" required>
         </div>
-        <button type="submit" class="primary">确认创建预约</button>
+        <button type="submit" class="success">✅ 确认并生成排班预约单</button>
       </form>
-      <h4 style="margin-top: 25px;">当前预约排班列表</h4>
+      <h4 style="margin-top: 25px; color: #38bdf8;">实时预约与私域转化列表</h4>
       <table>
         <thead>
           <tr>
@@ -108,64 +275,10 @@ const defaultHtml = `<!DOCTYPE html>
             <th>客户手机号</th>
             <th>预约时间</th>
             <th>状态</th>
-            <th>操作</th>
+            <th>沟通与管理</th>
           </tr>
         </thead>
         <tbody id="appointmentList"></tbody>
-      </table>
-    </div>
-
-    <!-- 2. 社媒账号与定向搜索模块 -->
-    <div class="card">
-      <h3>🌐 多平台社媒定向搜索与获客任务</h3>
-      <form id="socialSearchForm" class="form-grid">
-        <div class="form-group">
-          <label>选择平台账号：</label>
-          <select id="ssAccount" required><option value="">请选择账号</option></select>
-        </div>
-        <div class="form-group">
-          <label>目标平台：</label>
-          <input type="text" id="ssPlatform" readonly placeholder="自动匹配" style="background: #edf2f7;">
-        </div>
-        <div class="form-group">
-          <label>目标国家 (Country)：</label>
-          <input type="text" id="ssCountry" placeholder="UAE / Saudi">
-        </div>
-        <div class="form-group">
-          <label>目标城市 (City)：</label>
-          <input type="text" id="ssCity" placeholder="Dubai / Riyadh">
-        </div>
-        <div class="form-group">
-          <label>搜索关键词：</label>
-          <input type="text" id="ssKeywords" placeholder="Salon & Spa" required>
-        </div>
-        <div class="form-group">
-          <label>性别筛选：</label>
-          <select id="ssGender">
-            <option value="不限">不限 / All</option>
-            <option value="男性">男性 / Male</option>
-            <option value="女性">女性 / Female</option>
-          </select>
-        </div>
-        <div style="grid-column: 1 / -1; margin-top: 10px;">
-          <button type="submit" class="primary" style="width: 100%; padding: 12px;">保存并创建定向搜索任务</button>
-        </div>
-      </form>
-      <h4 style="margin-top: 30px;">当前社媒定向搜索任务列表</h4>
-      <table>
-        <thead>
-          <tr>
-            <th>Platform</th>
-            <th>Account ID</th>
-            <th>Country</th>
-            <th>City</th>
-            <th>Keywords</th>
-            <th>Gender</th>
-            <th>Status</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody id="socialSearchList"></tbody>
       </table>
     </div>
   </div>
@@ -178,7 +291,7 @@ if (!fs.existsSync(indexPath)) {
   fs.writeFileSync(indexPath, defaultHtml, 'utf8');
 }
 
-// ==================== 2. SQLite 数据库初始化与默认账号创建 ====================
+// ==================== 2. SQLite 数据库初始化 ====================
 const db = new Database('data.db');
 
 db.exec(`
@@ -210,6 +323,15 @@ db.exec(`
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 
+  CREATE TABLE IF NOT EXISTS leads (
+    id TEXT PRIMARY KEY,
+    name TEXT,
+    phone TEXT,
+    source TEXT,
+    center TEXT,
+    created_at TEXT
+  );
+
   CREATE TABLE IF NOT EXISTS appointments (
     appointment_number TEXT PRIMARY KEY,
     staff_id TEXT,
@@ -221,39 +343,91 @@ db.exec(`
   );
 `);
 
-// 检查并初始化默认管理员账号 (admin / admin123)
-const adminExists = db.prepare('SELECT * FROM users WHERE username = ?').get('admin');
+// 检查并自动创建超管账号 dubailcaizxy
+const superAdminUser = 'dubailcaizxy';
+const adminExists = db.prepare('SELECT * FROM users WHERE username = ?').get(superAdminUser);
 if (!adminExists) {
-  db.prepare('INSERT INTO users (username, password, role) VALUES (?, ?, ?)').run('admin', 'admin123', 'admin');
+  db.prepare('INSERT INTO users (username, password, role) VALUES (?, ?, ?)').run(superAdminUser, 'dubailcaizxy123', 'admin');
 }
 
 app.use(express.json());
 app.use(express.static(publicDir));
 
-// ==================== 3. 登录认证与后端 API ====================
+// ==================== 3. API 路由 ====================
 
-// 登录接口
+// 登录校验
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body || {};
   const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(username, password);
-  if (!user) {
-    return res.status(401).json({ error: '用户名或密码错误' });
-  }
+  if (!user) return res.status(401).json({ error: '用户名或密码错误' });
   res.json({ ok: true, username: user.username, role: user.role });
 });
 
-// 社交账号管理
-app.get('/api/social-accounts', (req, res) => {
+// 管理员开通/管理用户账号 API
+app.get('/api/admin/users', (req, res) => {
   try {
-    res.json(db.prepare('SELECT * FROM social_accounts ORDER BY id DESC').all());
+    const users = db.prepare('SELECT id, username, role, created_at FROM users ORDER BY id DESC').all();
+    res.json(users);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/admin/users', (req, res) => {
+  try {
+    const { username, password, role } = req.body || {};
+    if (!username || !password) return res.status(400).json({ error: '用户名和密码不能为空' });
+    
+    const existing = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+    if (existing) return res.status(409).json({ error: '该用户名已存在' });
+
+    const result = db.prepare('INSERT INTO users (username, password, role) VALUES (?, ?, ?)').run(username, password, role || 'staff');
+    res.json({ ok: true, id: result.lastInsertRowid });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/admin/users/:id', (req, res) => {
+  try {
+    db.prepare('DELETE FROM users WHERE id = ?').run(Number(req.params.id));
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// 看板统计
+app.get('/api/dashboard/stats', (req, res) => {
+  try {
+    const total = db.prepare('SELECT COUNT(*) as cnt FROM leads').get().cnt;
+    const fb = db.prepare("SELECT COUNT(*) as cnt FROM leads WHERE source LIKE '%Facebook%'").get().cnt;
+    const ig = db.prepare("SELECT COUNT(*) as cnt FROM leads WHERE source LIKE '%Instagram%'").get().cnt;
+    const tk = db.prepare("SELECT COUNT(*) as cnt FROM leads WHERE source LIKE '%TikTok%'").get().cnt;
+    res.json({ ok: true, total, fb, ig, tk });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// 社媒账号管理
+app.get('/api/social-accounts', (req, res) => {
+  try { res.json(db.prepare('SELECT * FROM social_accounts ORDER BY id DESC').all()); }
+  catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/social-accounts', (req, res) => {
+  try {
+    const { platform, label, profile_id } = req.body || {};
+    if (!platform || !label || !profile_id) return res.status(400).json({ error: '字段不能为空' });
+    const result = db.prepare('INSERT INTO social_accounts (platform, label, profile_id) VALUES (?, ?, ?)').run(platform, label, profile_id);
+    res.json({ ok: true, id: result.lastInsertRowid });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.delete('/api/social-accounts/:id', (req, res) => {
+  try {
+    db.prepare('DELETE FROM social_accounts WHERE id = ?').run(Number(req.params.id));
+    res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // 预约管理
 app.get('/api/appointments', (req, res) => {
-  try {
-    res.json(db.prepare('SELECT * FROM appointments ORDER BY created_at DESC').all());
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { res.json(db.prepare('SELECT * FROM appointments ORDER BY created_at DESC').all()); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/appointments', (req, res) => {
@@ -275,14 +449,13 @@ app.delete('/api/appointments/:no', (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// 社交搜索任务管理
+// 搜索任务
 const clean = (v, max = 200) => String(v ?? "").trim().slice(0, max);
 const validPlatforms = ["Facebook", "Instagram", "TikTok"];
 
 app.get('/api/social-search', (req, res) => {
-  try {
-    res.json(db.prepare(`SELECT * FROM social_search_configs ORDER BY id DESC`).all());
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  try { res.json(db.prepare(`SELECT * FROM social_search_configs ORDER BY id DESC`).all()); }
+  catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/social-search', (req, res) => {
@@ -295,7 +468,7 @@ app.post('/api/social-search', (req, res) => {
   const gender = clean(b.gender || "不限", 20);
 
   if (!accountId || !validPlatforms.includes(platform) || !keywords) {
-    return res.status(400).json({ error: "参数校验失败" });
+    return res.status(400).json({ error: "校验失败" });
   }
 
   try {
@@ -349,5 +522,5 @@ app.post('/api/social-search/:id/run', async (req, res) => {
 app.get('/', (req, res) => res.sendFile(indexPath));
 
 app.listen(PORT, () => {
-  console.log(`AI Lead Master Backend with Login is running on port ${PORT}`);
+  console.log(`AI Lead Master Backend is running on port ${PORT}`);
 });
