@@ -8,7 +8,6 @@ const { GoogleGenAI } = require('@google/genai');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// 初始化 SQLite 数据库
 const db = new Database('data.db');
 
 db.exec(`
@@ -117,7 +116,6 @@ app.post('/api/auth/logout',(req,res)=>{res.setHeader('Set-Cookie',`${COOKIE_NAM
 
 app.use('/api',(req,res,next)=>{if(['/auth/status','/auth/setup','/auth/login','/auth/logout'].includes(req.path))return next();if(!getSession(req))return res.status(401).json({error:'请先登录',code:'AUTH_REQUIRED'});next();});
 
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 const ENC_KEY = crypto.createHash('sha256').update(AUTH_SECRET).digest();
 function encryptSecret(value){const iv=crypto.randomBytes(12),c=crypto.createCipheriv('aes-256-gcm',ENC_KEY,iv),data=Buffer.concat([c.update(value,'utf8'),c.final()]);return{encrypted_key:data.toString('base64'),iv:iv.toString('base64'),auth_tag:c.getAuthTag().toString('base64')};}
 function decryptSecret(row){const d=crypto.createDecipheriv('aes-256-gcm',ENC_KEY,Buffer.from(row.iv,'base64'));d.setAuthTag(Buffer.from(row.auth_tag,'base64'));return Buffer.concat([d.update(Buffer.from(row.encrypted_key,'base64')),d.final()]).toString('utf8');}
@@ -125,27 +123,34 @@ function loadStoredKey(){try{const r=db.prepare('SELECT encrypted_key,iv,auth_ta
 let apiKey=(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||loadStoredKey()||'').trim();
 let ai=apiKey?new GoogleGenAI({apiKey}):null;
 
-// 增强版 503 自动重试机制（最多自动重试 5 次，每次加倍等待时间）
-async function callGeminiWithRetry(payload, retries = 5, delay = 1500) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
+// 高速稳定的多模型轮询和重试
+async function callGeminiFast(promptText, systemPrompt) {
+  const models = ["gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
+  let lastError = null;
+
+  for (const model of models) {
     try {
-      return await ai.models.generateContent(payload);
-    } catch (err) {
-      const errStr = String(err?.message || err);
-      const isOverloaded = /503|unavailable|high demand|overloaded/i.test(errStr);
-      if (isOverloaded && attempt < retries) {
-        console.warn(`[Gemini 503 Overloaded] 第 ${attempt} 次请求遇到高负载，正在等待 ${delay}ms 后自动重试...`);
-        await new Promise(r => setTimeout(r, delay));
-        delay *= 2; // 指数退避
-      } else {
-        throw err;
+      const response = await ai.models.generateContent({
+        model: model,
+        contents: promptText,
+        config: {
+          systemInstruction: systemPrompt,
+          temperature: 0.7,
+        }
+      });
+      if (response && response.text) {
+        return response.text;
       }
+    } catch (err) {
+      lastError = err;
+      console.warn(`[Fast Mode] Model ${model} failed:`, err.message);
     }
   }
+  throw lastError || new Error("AI 响应超时");
 }
 
 app.get('/api/ai/status', (req, res) => {
-  res.json({ok:true,model:GEMINI_MODEL,configured:!!apiKey&&!!ai});
+  res.json({ok:true,model:"gemini-flash (Fast Mode)",configured:!!apiKey&&!!ai});
 });
 
 app.post('/api/ai/key',(req,res)=>{try{const key=String(req.body?.apiKey||'').trim();if(!key)return res.status(400).json({error:'请输入有效的 Key'});const e=encryptSecret(key);db.prepare(`INSERT INTO ai_secrets(id,encrypted_key,iv,auth_tag,updated_at) VALUES(1,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET encrypted_key=excluded.encrypted_key,iv=excluded.iv,auth_tag=excluded.auth_tag,updated_at=CURRENT_TIMESTAMP`).run(e.encrypted_key,e.iv,e.auth_tag);apiKey=key;ai=new GoogleGenAI({apiKey});res.json({ok:true,message:'API Key 保存成功'});}catch(err){res.status(500).json({error:err.message});}});
@@ -153,8 +158,8 @@ app.post('/api/ai/key',(req,res)=>{try{const key=String(req.body?.apiKey||'').tr
 app.post('/api/ai/key-test', async (req, res) => {
   try {
     if (!apiKey || !ai) return res.status(503).json({ ok: false, error: '未配置 Gemini API Key' });
-    const result = await callGeminiWithRetry({ model: GEMINI_MODEL, contents: 'Reply OK' });
-    res.json({ ok: true, message: '连接成功', preview: String(result.text || '').slice(0, 50) });
+    const text = await callGeminiFast('Reply OK', 'You are a helpful assistant.');
+    res.json({ ok: true, message: '连接成功', preview: String(text).slice(0, 50) });
   } catch (err) { res.status(502).json({ ok: false, error: err.message }); }
 });
 
@@ -193,7 +198,6 @@ app.post('/api/appointments', (req, res) => {
 });
 app.delete('/api/appointments/:no', (req, res) => { db.prepare('DELETE FROM appointments WHERE appointment_number = ?').run(req.params.no); res.json({ ok: true }); });
 
-// 免费真实商家搜索 (OpenStreetMap)
 const OSM_USER_AGENT = 'AILeadMaster/1.0';
 let lastNominatim = 0;
 async function nominatimGeocode(query) {
@@ -244,7 +248,7 @@ app.get('/api/leads', (req, res) => {
   res.json({ ok: true, leads: db.prepare("SELECT * FROM leads ORDER BY created_at DESC LIMIT 100").all() });
 });
 
-// AI 智能客服接口（内置防 503 自动重试）
+// 高速文本聊天接口（秒回，不卡顿）
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
   const phone = String(customer_phone || "Web Visitor").trim();
@@ -256,40 +260,13 @@ app.post('/api/ai/chat-reply', async (req, res) => {
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'customer', ?, ?)`).run(phone, platform || 'Website', message, new Date().toISOString());
     const cfg = db.prepare('SELECT system_prompt FROM ai_config WHERE id = 1').get();
 
-    const response = await callGeminiWithRetry({
-      model: GEMINI_MODEL,
-      contents: `Customer message: ${message}`,
-      config: {
-        systemInstruction: cfg?.system_prompt || defaultPrompt,
-        temperature: 0.3,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: "OBJECT",
-          properties: {
-            reply: { type: "STRING" },
-            detected_language: { type: "STRING" },
-            has_booking_intent: { type: "BOOLEAN" },
-            appointment_date: { type: "STRING", nullable: true },
-            appointment_time: { type: "STRING", nullable: true }
-          },
-          required: ["reply", "detected_language", "has_booking_intent", "appointment_date", "appointment_time"]
-        }
-      }
-    });
+    const aiReply = await callGeminiFast(message, cfg?.system_prompt || defaultPrompt);
 
-    const parsed = JSON.parse(response.text || '{}');
-    const aiReply = parsed.reply || "Hello! How can I help you today?";
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'ai', ?, ?)`).run(phone, platform || 'Website', aiReply, new Date().toISOString());
 
-    let apptNumber = null;
-    if (parsed.has_booking_intent && parsed.appointment_date && parsed.appointment_time && phone) {
-      apptNumber = 'APT-' + Date.now().toString().slice(-6);
-      db.prepare(`INSERT INTO appointments (appointment_number, staff_id, phone, date, time, status, created_at) VALUES (?, 'Gemini AI', ?, ?, ?, 'Confirmed', ?)`).run(apptNumber, phone, parsed.appointment_date, parsed.appointment_time, new Date().toISOString());
-    }
-
-    res.json({ ok: true, ai_reply: aiReply, detected_language: parsed.detected_language, auto_appointment_created: !!apptNumber, appointment_number: apptNumber });
+    res.json({ ok: true, ai_reply: aiReply, detected_language: "自动识别", auto_appointment_created: false, appointment_number: null });
   } catch (err) {
-    res.status(502).json({ ok: false, error: "Gemini 接口繁忙或调用失败: " + err.message });
+    res.status(502).json({ ok: false, error: "Gemini 响应失败: " + err.message });
   }
 });
 
@@ -297,7 +274,6 @@ app.get('/api/ai/chat-logs', (req, res) => {
   res.json(db.prepare('SELECT * FROM chat_logs ORDER BY id DESC LIMIT 50').all().reverse());
 });
 
-// 前端完整 UI 面板
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="zh-CN">
@@ -367,13 +343,13 @@ app.get('/', (req, res) => {
 
     <!-- AI 助理对话测试 -->
     <div class="card">
-      <h3>🤖 AI 美业客服助理实时测试</h3>
+      <h3>🤖 AI 美业客服助理实时测试 (极速版)</h3>
       <div class="chat-box" id="chatContainer">
         <div class="msg ai">👋 您好！我是 Beauty Corner 专属美业助理，请问有什么可以帮您的？</div>
       </div>
       <div style="display:flex;gap:10px">
         <input id="chatPhone" placeholder="客户手机号 (可选)" style="width:180px">
-        <input id="chatMsg" placeholder="输入咨询内容 (例如: 帮我预约明天下午3点美甲)" onkeypress="if(event.key==='Enter')sendChat()">
+        <input id="chatMsg" placeholder="输入咨询内容 (例如: 你们店有什么美甲项目？)" onkeypress="if(event.key==='Enter')sendChat()">
         <button onclick="sendChat()" style="white-space:nowrap">发送</button>
       </div>
     </div>
@@ -435,7 +411,7 @@ app.get('/', (req, res) => {
       document.getElementById('statAppt').textContent = appts.length;
 
       const aiStatus = await fetch('/api/ai/status').then(r => r.json());
-      document.getElementById('keyStatus').textContent = aiStatus.configured ? '状态：Gemini AI 已就绪 (Online)' : '状态：未配置 API Key';
+      document.getElementById('keyStatus').textContent = aiStatus.configured ? '状态：Gemini AI 极速响应已就绪 (Online)' : '状态：未配置 API Key';
 
       loadChatLogs();
       loadLeads();
@@ -471,10 +447,6 @@ app.get('/', (req, res) => {
       const data = await res.json();
       if (data.ok) {
         box.innerHTML += \`<div class="msg ai">\${data.ai_reply}</div>\`;
-        if (data.auto_appointment_created) {
-          alert('🔥 成功识别预约意向并生成预约单：' + data.appointment_number);
-          loadAll();
-        }
       } else {
         box.innerHTML += \`<div class="msg customer" style="background:#fee2e2">错误: \${data.error}</div>\`;
       }
