@@ -123,14 +123,19 @@ function loadStoredKey(){try{const r=db.prepare('SELECT encrypted_key,iv,auth_ta
 let apiKey=(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||loadStoredKey()||'').trim();
 let ai=apiKey?new GoogleGenAI({apiKey}):null;
 
-// 优先采用最新的官方 3.8-flash 模型，如果遇到偶发网络波动自动回退到 2.0-flash
-async function callGeminiFast(promptText, systemPrompt) {
-  const models = ["gemini-3.8-flash", "gemini-2.0-flash"];
+// 带有 15 秒超时保护与多模型自动回退的高速调用函数
+async function callGeminiSafe(promptText, systemPrompt) {
+  if (!apiKey || !ai) throw new Error("未配置有效的 Gemini API Key");
+  const models = ["gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
   let lastError = null;
 
   for (const model of models) {
     try {
-      const response = await ai.models.generateContent({
+      // 15 秒超时控制器
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+      const promise = ai.models.generateContent({
         model: model,
         contents: promptText,
         config: {
@@ -138,19 +143,23 @@ async function callGeminiFast(promptText, systemPrompt) {
           temperature: 0.7,
         }
       });
+
+      const response = await promise;
+      clearTimeout(timeoutId);
+
       if (response && response.text) {
         return response.text;
       }
     } catch (err) {
       lastError = err;
-      console.warn(`[Fast Mode] Model ${model} failed:`, err.message);
+      console.warn(`[Safe Mode] Model ${model} failed:`, err.message);
     }
   }
-  throw lastError || new Error("AI 响应超时");
+  throw lastError || new Error("AI 响应超时或所有模型调用失败");
 }
 
 app.get('/api/ai/status', (req, res) => {
-  res.json({ok:true,model:"gemini-3.8-flash (Fast Mode)",configured:!!apiKey&&!!ai});
+  res.json({ok:true,model:"gemini-3.8-flash (Safe Mode)",configured:!!apiKey&&!!ai});
 });
 
 app.post('/api/ai/key',(req,res)=>{try{const key=String(req.body?.apiKey||'').trim();if(!key)return res.status(400).json({error:'请输入有效的 Key'});const e=encryptSecret(key);db.prepare(`INSERT INTO ai_secrets(id,encrypted_key,iv,auth_tag,updated_at) VALUES(1,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET encrypted_key=excluded.encrypted_key,iv=excluded.iv,auth_tag=excluded.auth_tag,updated_at=CURRENT_TIMESTAMP`).run(e.encrypted_key,e.iv,e.auth_tag);apiKey=key;ai=new GoogleGenAI({apiKey});res.json({ok:true,message:'API Key 保存成功'});}catch(err){res.status(500).json({error:err.message});}});
@@ -158,7 +167,7 @@ app.post('/api/ai/key',(req,res)=>{try{const key=String(req.body?.apiKey||'').tr
 app.post('/api/ai/key-test', async (req, res) => {
   try {
     if (!apiKey || !ai) return res.status(503).json({ ok: false, error: '未配置 Gemini API Key' });
-    const text = await callGeminiFast('Reply OK', 'You are a helpful assistant.');
+    const text = await callGeminiSafe('Reply OK', 'You are a helpful assistant.');
     res.json({ ok: true, message: '连接成功', preview: String(text).slice(0, 50) });
   } catch (err) { res.status(502).json({ ok: false, error: err.message }); }
 });
@@ -248,19 +257,19 @@ app.get('/api/leads', (req, res) => {
   res.json({ ok: true, leads: db.prepare("SELECT * FROM leads ORDER BY created_at DESC LIMIT 100").all() });
 });
 
-// 极速文本回复聊天接口
+// 具备完善错误捕获和状态返回的聊天接口
 app.post('/api/ai/chat-reply', async (req, res) => {
   const { customer_phone, customer_message, platform } = req.body || {};
   const phone = String(customer_phone || "Web Visitor").trim();
   const message = String(customer_message || "").trim();
   if (!message) return res.status(400).json({ ok: false, error: "消息不能为空" });
-  if (!apiKey || !ai) return res.status(503).json({ ok: false, error: "未配置 Gemini API Key" });
+  if (!apiKey || !ai) return res.status(503).json({ ok: false, error: "未配置 Gemini API Key，请先在上方设置并保存 Key" });
 
   try {
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'customer', ?, ?)`).run(phone, platform || 'Website', message, new Date().toISOString());
     const cfg = db.prepare('SELECT system_prompt FROM ai_config WHERE id = 1').get();
 
-    const aiReply = await callGeminiFast(message, cfg?.system_prompt || defaultPrompt);
+    const aiReply = await callGeminiSafe(message, cfg?.system_prompt || defaultPrompt);
 
     db.prepare(`INSERT INTO chat_logs (customer_phone, platform, sender, message, created_at) VALUES (?, ?, 'ai', ?, ?)`).run(phone, platform || 'Website', aiReply, new Date().toISOString());
 
@@ -343,14 +352,14 @@ app.get('/', (req, res) => {
 
     <!-- AI 助理对话测试 -->
     <div class="card">
-      <h3>🤖 AI 美业客服助理实时测试 (极速版)</h3>
+      <h3>🤖 AI 美业客服助理实时测试 (极速安全版)</h3>
       <div class="chat-box" id="chatContainer">
         <div class="msg ai">👋 您好！我是 Beauty Corner 专属美业助理，请问有什么可以帮您的？</div>
       </div>
       <div style="display:flex;gap:10px">
         <input id="chatPhone" placeholder="客户手机号 (可选)" style="width:180px">
         <input id="chatMsg" placeholder="输入咨询内容 (例如: 你们店有什么美甲项目？)" onkeypress="if(event.key==='Enter')sendChat()">
-        <button onclick="sendChat()" style="white-space:nowrap">发送</button>
+        <button id="sendBtn" onclick="sendChat()" style="white-space:nowrap">发送</button>
       </div>
     </div>
 
@@ -411,7 +420,7 @@ app.get('/', (req, res) => {
       document.getElementById('statAppt').textContent = appts.length;
 
       const aiStatus = await fetch('/api/ai/status').then(r => r.json());
-      document.getElementById('keyStatus').textContent = aiStatus.configured ? '状态：Gemini AI 极速响应已就绪 (Online)' : '状态：未配置 API Key';
+      document.getElementById('keyStatus').textContent = aiStatus.configured ? '状态：Gemini AI 已就绪 (Online)' : '状态：未配置 API Key，请在上方输入并保存';
 
       loadChatLogs();
       loadLeads();
@@ -419,6 +428,7 @@ app.get('/', (req, res) => {
 
     async function saveApiKey() {
       const apiKey = document.getElementById('apiKeyInput').value.trim();
+      if (!apiKey) { alert('请输入 Key'); return; }
       const res = await fetch('/api/ai/key', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey }) });
       const data = await res.json();
       alert(data.message || data.error);
@@ -426,31 +436,52 @@ app.get('/', (req, res) => {
     }
 
     async function testKey() {
-      const res = await fetch('/api/ai/key-test', { method: 'POST' });
-      const data = await res.json();
-      alert(data.ok ? '连接成功！' : '连接失败: ' + data.error);
+      const btn = event.target;
+      btn.textContent = '测试中...';
+      try {
+        const res = await fetch('/api/ai/key-test', { method: 'POST' });
+        const data = await res.json();
+        alert(data.ok ? '连接成功！' : '连接失败: ' + data.error);
+      } catch (err) {
+        alert('请求出错: ' + err.message);
+      } finally {
+        btn.textContent = '测试连接';
+      }
     }
 
     async function sendChat() {
       const phone = document.getElementById('chatPhone').value.trim();
       const message = document.getElementById('chatMsg').value.trim();
       if (!message) return;
+
       const box = document.getElementById('chatContainer');
+      const sendBtn = document.getElementById('sendBtn');
+      
       box.innerHTML += \`<div class="msg customer">[\${phone || 'Web'}] \${message}</div>\`;
       document.getElementById('chatMsg').value = '';
       box.scrollTop = box.scrollHeight;
 
-      const res = await fetch('/api/ai/chat-reply', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ customer_phone: phone, customer_message: message })
-      });
-      const data = await res.json();
-      if (data.ok) {
-        box.innerHTML += \`<div class="msg ai">\${data.ai_reply}</div>\`;
-      } else {
-        box.innerHTML += \`<div class="msg customer" style="background:#fee2e2">错误: \${data.error}</div>\`;
+      sendBtn.textContent = '发送中...';
+      sendBtn.disabled = true;
+
+      try {
+        const res = await fetch('/api/ai/chat-reply', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customer_phone: phone, customer_message: message })
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+          box.innerHTML += \`<div class="msg ai">\${data.ai_reply}</div>\`;
+        } else {
+          box.innerHTML += \`<div class="msg customer" style="background:#fee2e2; color:#b91c1c">错误: \${data.error || '未知错误'}</div>\`;
+        }
+      } catch (err) {
+        box.innerHTML += \`<div class="msg customer" style="background:#fee2e2; color:#b91c1c">网络异常: \${err.message}</div>\`;
+      } finally {
+        sendBtn.textContent = '发送';
+        sendBtn.disabled = false;
+        box.scrollTop = box.scrollHeight;
       }
-      box.scrollTop = box.scrollHeight;
     }
 
     async function loadChatLogs() {
