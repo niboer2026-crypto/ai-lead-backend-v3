@@ -1,7 +1,7 @@
-
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
+const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const { GoogleGenAI } = require('@google/genai');
 
@@ -75,6 +75,13 @@ db.exec(`
     welcome_msg TEXT,
     system_prompt TEXT
   );
+  CREATE TABLE IF NOT EXISTS ai_secrets (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    encrypted_key TEXT NOT NULL,
+    iv TEXT NOT NULL,
+    auth_tag TEXT NOT NULL,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // 兼容旧版 data.db：为真实地图线索增加字段，不删除原有客户数据
@@ -94,7 +101,7 @@ try {
   db.prepare("DELETE FROM leads WHERE name LIKE '社媒潜在客户 (%' OR name LIKE '定向客户 (%'").run();
 } catch (e) { console.error('[Mock lead cleanup]', e.message); }
 
-// 自动清理：启动时自动清理 7 天前的旧聊天日志
+// 🧹 自动清理：启动时自动清理 7 天前的旧聊天日志
 try {
   db.exec(`DELETE FROM chat_logs WHERE datetime(created_at) < datetime('now', '-7 days');`);
 } catch (e) {}
@@ -109,14 +116,30 @@ if (!existingConfig) {
 
 app.use(express.json());
 
-// Gemini 配置：密钥只放在服务器环境变量，绝不能放到前端
-const apiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "").trim();
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
+// Admin first-run setup and signed-cookie authentication
+const AUTH_SECRET = process.env.APP_ENCRYPTION_KEY || process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+if (!process.env.APP_ENCRYPTION_KEY && !process.env.SESSION_SECRET) console.warn('[Security] 建议在 Render 设置固定 APP_ENCRYPTION_KEY，否则重启后需要重新登录，后台加密保存的 Gemini Key 也无法解密。');
+const COOKIE_NAME = 'alm_session';
+function signToken(payload) { const body=Buffer.from(JSON.stringify(payload)).toString('base64url'); const sig=crypto.createHmac('sha256',AUTH_SECRET).update(body).digest('base64url'); return body+'.'+sig; }
+function verifyToken(token) { try { const [body,sig]=String(token||'').split('.'); const expected=crypto.createHmac('sha256',AUTH_SECRET).update(body).digest(); const actual=Buffer.from(sig,'base64url'); if(actual.length!==expected.length||!crypto.timingSafeEqual(actual,expected)) return null; const d=JSON.parse(Buffer.from(body,'base64url').toString()); return d.exp>Date.now()?d:null; } catch { return null; } }
+function getSession(req) { const c=String(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(COOKIE_NAME+'=')); return c?verifyToken(decodeURIComponent(c.slice(COOKIE_NAME.length+1))):null; }
+function hashPassword(password,salt=crypto.randomBytes(16).toString('hex')) { return {salt,hash:crypto.scryptSync(password,salt,64).toString('hex')}; }
+function checkPassword(password,salt,hash) { const a=crypto.scryptSync(password,salt,64), b=Buffer.from(hash,'hex'); return a.length===b.length&&crypto.timingSafeEqual(a,b); }
+app.get('/api/auth/status',(req,res)=>{ const admin=db.prepare("SELECT id FROM users WHERE role='admin' LIMIT 1").get(); const session=getSession(req); res.json({setupRequired:!admin,authenticated:!!session,username:session?.username||null}); });
+app.post('/api/auth/setup',(req,res)=>{ if(db.prepare("SELECT id FROM users WHERE role='admin' LIMIT 1").get()) return res.status(409).json({error:'管理员已经创建，请直接登录。'}); const username=String(req.body?.username||'').trim().slice(0,40), password=String(req.body?.password||''); if(!/^[a-zA-Z0-9_.-]{3,40}$/.test(username)) return res.status(400).json({error:'用户名需为 3-40 位字母、数字或 . _ -'}); if(password.length<10) return res.status(400).json({error:'密码至少 10 位。'}); const h=hashPassword(password); db.prepare('INSERT INTO users(username,password,role) VALUES(?,?,?)').run(username,h.salt+':'+h.hash,'admin'); const token=signToken({username,exp:Date.now()+7*86400000}); res.setHeader('Set-Cookie',`${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800${process.env.NODE_ENV==='production'?'; Secure':''}`); res.json({ok:true,username}); });
+app.post('/api/auth/login',(req,res)=>{ const username=String(req.body?.username||'').trim(), password=String(req.body?.password||''); const row=db.prepare("SELECT * FROM users WHERE username=? AND role='admin'").get(username); if(!row) return res.status(401).json({error:'用户名或密码错误。'}); const [salt,hash]=String(row.password).split(':'); const valid=hash?checkPassword(password,salt,hash):row.password===password; if(!valid) return res.status(401).json({error:'用户名或密码错误。'}); const token=signToken({username,exp:Date.now()+7*86400000}); res.setHeader('Set-Cookie',`${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800${process.env.NODE_ENV==='production'?'; Secure':''}`); res.json({ok:true,username}); });
+app.post('/api/auth/logout',(req,res)=>{res.setHeader('Set-Cookie',`${COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${process.env.NODE_ENV==='production'?'; Secure':''}`);res.json({ok:true});});
+app.use('/api',(req,res,next)=>{if(['/auth/status','/auth/setup','/auth/login','/auth/logout'].includes(req.path))return next();if(!getSession(req))return res.status(401).json({error:'登录已失效，请重新登录。',code:'AUTH_REQUIRED'});next();});
 
-if (!apiKey) {
-  console.error("[Gemini] 缺少 GEMINI_API_KEY。请在服务器环境变量中配置。");
-}
+// Gemini Key：优先使用 Render 环境变量；也支持后台加密保存到 SQLite。
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const ENC_KEY = crypto.createHash('sha256').update(AUTH_SECRET).digest();
+function encryptSecret(value){const iv=crypto.randomBytes(12),c=crypto.createCipheriv('aes-256-gcm',ENC_KEY,iv),data=Buffer.concat([c.update(value,'utf8'),c.final()]);return{encrypted_key:data.toString('base64'),iv:iv.toString('base64'),auth_tag:c.getAuthTag().toString('base64')};}
+function decryptSecret(row){const d=crypto.createDecipheriv('aes-256-gcm',ENC_KEY,Buffer.from(row.iv,'base64'));d.setAuthTag(Buffer.from(row.auth_tag,'base64'));return Buffer.concat([d.update(Buffer.from(row.encrypted_key,'base64')),d.final()]).toString('utf8');}
+function loadStoredKey(){try{const r=db.prepare('SELECT encrypted_key,iv,auth_tag FROM ai_secrets WHERE id=1').get();return r?decryptSecret(r):'';}catch{return '';}}
+let apiKey=(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY||loadStoredKey()||'').trim();
+let ai=apiKey?new GoogleGenAI({apiKey}):null;
+if(!apiKey) console.error('[Gemini] 尚未配置 API Key，请在后台 Gemini 设置中填写。');
 
 function getGeminiErrorMessage(err) {
   const raw = String(err?.message || err || "Unknown Gemini error");
@@ -131,7 +154,20 @@ function getGeminiErrorMessage(err) {
 
 // AI 连通性状态：前端可直接检查是否配置密钥（不返回密钥本身）
 app.get('/api/ai/status', (req, res) => {
-  res.json({ ok: true, provider: "Gemini", configured: !!apiKey, model: GEMINI_MODEL });
+  res.json({ok:true,provider:'Gemini',configured:!!apiKey&&!!ai,model:GEMINI_MODEL,editable_in_dashboard:true,source:(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY)?'environment':(loadStoredKey()?'dashboard':'none')});
+});
+
+
+// 保存 Gemini Key：服务端 AES-256-GCM 加密，不向浏览器返回明文。
+app.post('/api/ai/key',(req,res)=>{try{if(process.env.GEMINI_API_KEY||process.env.GOOGLE_API_KEY)return res.status(409).json({error:'当前优先使用 Render 环境变量 Key。请先删除 GEMINI_API_KEY / GOOGLE_API_KEY，才能改用后台保存。'});const key=String(req.body?.apiKey||'').trim();if(key.length<20||key.length>500)return res.status(400).json({error:'请填写有效的 Gemini API Key。'});const e=encryptSecret(key);db.prepare(`INSERT INTO ai_secrets(id,encrypted_key,iv,auth_tag,updated_at) VALUES(1,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET encrypted_key=excluded.encrypted_key,iv=excluded.iv,auth_tag=excluded.auth_tag,updated_at=CURRENT_TIMESTAMP`).run(e.encrypted_key,e.iv,e.auth_tag);apiKey=key;ai=new GoogleGenAI({apiKey});res.json({ok:true,message:'Gemini Key 已加密保存，可以测试连接。'});}catch(err){res.status(500).json({error:err.message});}});
+
+// Gemini 连通性测试：只测试 Render 环境变量中的 Key，不接收或保存用户提交的密钥。
+app.post('/api/ai/key-test', async (req, res) => {
+  try {
+    if (!apiKey || !ai) return res.status(503).json({ ok: false, error: '服务器尚未配置 GEMINI_API_KEY。请先在 Render Environment 中添加后重新部署。' });
+    const result = await ai.models.generateContent({ model: GEMINI_MODEL, contents: 'Reply with the single word OK.' });
+    res.json({ ok: true, message: '连接成功，Gemini 已正常响应。', preview: String(result.text || '').slice(0, 80) });
+  } catch (err) { res.status(502).json({ ok: false, error: getGeminiErrorMessage(err) }); }
 });
 
 // AI 配置 API
@@ -200,7 +236,6 @@ app.delete('/api/appointments/:no', (req, res) => {
   catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-  
 // 搜客任务 API
 const clean = (v, max = 200) => String(v ?? "").trim().slice(0, max);
 app.get('/api/social-search', (req, res) => {
@@ -355,9 +390,9 @@ app.post('/api/ai/chat-reply', async (req, res) => {
     const userPromptCustom = currentConfig?.system_prompt || defaultPrompt;
     const systemInstruction = `${userPromptCustom}
 
-You are the customer service assistant for a beauty salon business serving Dubai/UAE. Reply in the same language as the customer (English, Arabic, or Chinese). Be warm, concise, professional and helpful. Never claim a booking is confirmed unless the customer has clearly provided a date, time and phone number and the booking system has successfully created it. Do not invent prices, services, availability, addresses or policies; ask a short follow-up question when details are missing.
+You are the customer service assistant for a beauty salon business serving Dubai/UAE. Detect the language of each incoming customer message and reply in that exact language. Support any language, including English, Arabic, Chinese, Nepali, Hindi, French, Urdu and others. Do not translate the reply into the administrator interface language. Be warm, concise, professional and helpful. Never claim a booking is confirmed unless the customer has clearly provided a date, time and phone number and the booking system has successfully created it. Do not invent prices, services, availability, addresses or policies; ask a short follow-up question when details are missing.
 Today in Dubai is ${today}.
-Return ONLY valid JSON with exactly these keys: {"reply":"string","has_booking_intent":false,"appointment_date":null,"appointment_time":null}. Set has_booking_intent=true only when the customer clearly asks to make an appointment, not merely asks about prices or services. Use YYYY-MM-DD for a clearly specified date and HH:MM (24-hour) for a clearly specified time. If date or time is unclear, return null for that field.`;
+Return ONLY valid JSON with exactly these keys: {"reply":"string","detected_language":"language name","has_booking_intent":false,"appointment_date":null,"appointment_time":null}. Set has_booking_intent=true only when the customer clearly asks to make an appointment, not merely asks about prices or services. Use YYYY-MM-DD for a clearly specified date and HH:MM (24-hour) for a clearly specified time. If date or time is unclear, return null for that field.`;
 
     const response = await ai.models.generateContent({
       model: GEMINI_MODEL,
@@ -372,11 +407,12 @@ Customer message: ${message}`,
           type: "OBJECT",
           properties: {
             reply: { type: "STRING" },
+            detected_language: { type: "STRING" },
             has_booking_intent: { type: "BOOLEAN" },
             appointment_date: { type: "STRING", nullable: true },
             appointment_time: { type: "STRING", nullable: true }
           },
-          required: ["reply", "has_booking_intent", "appointment_date", "appointment_time"]
+          required: ["reply", "detected_language", "has_booking_intent", "appointment_date", "appointment_time"]
         }
       }
     });
@@ -400,11 +436,10 @@ Customer message: ${message}`,
     if (hasBookingIntent && apptDate && apptTime && phone) {
       apptNumber = 'APT-' + Date.now().toString().slice(-6);
       db.prepare(`INSERT INTO appointments (appointment_number, staff_id, phone, date, time, status, created_at) VALUES (?, 'Gemini Assistant', ?, ?, ?, 'Pending Confirmation', ?)`).run(apptNumber, phone, apptDate, apptTime, new Date().toISOString());
-
       autoAppointmentCreated = true;
     }
 
-    res.json({ ok: true, provider: "Gemini", model: GEMINI_MODEL, customer_phone: phone, ai_reply: aiReply, auto_appointment_created: autoAppointmentCreated, appointment_number: apptNumber, extracted_date: apptDate, extracted_time: apptTime });
+    res.json({ ok: true, provider: "Gemini", model: GEMINI_MODEL, customer_phone: phone, detected_language: String(aiResult.detected_language || "自动识别"), ai_reply: aiReply, auto_appointment_created: autoAppointmentCreated, appointment_number: apptNumber, extracted_date: apptDate, extracted_time: apptTime });
   } catch (error) {
     const friendly = getGeminiErrorMessage(error);
     console.error("[Gemini Chat Error]", error?.stack || error);
@@ -429,72 +464,49 @@ app.get('/', (req, res) => {
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>AI Lead Master - 智能美业 CRM</title>
   <style>
-    * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; margin: 0; padding: 12px; color: #f8fafc; }
-    .container { max-width: 1400px; margin: 0 auto; background: #1e293b; padding: 18px; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid #334155; }
-    .header-bar { border-bottom: 2px solid #334155; padding-bottom: 12px; margin-bottom: 16px; }
-    .header-top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
-    h2 { color: #38bdf8; margin: 0; font-size: 20px; }
-    .nav-buttons-scroll { display: flex; gap: 10px; overflow-x: auto; white-space: nowrap; padding: 4px 2px 10px 2px; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
-    .nav-buttons-scroll::-webkit-scrollbar { display: none; }
-    .nav-btn { flex: 0 0 auto; background: #0f172a; color: #38bdf8; border: 1px solid #334155; padding: 8px 16px; border-radius: 20px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
-    .nav-btn:hover, .nav-btn:active { background: #38bdf8; color: #0f172a; }
-    .lang-btn { background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff; border: none; padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: bold; cursor: pointer; }
-    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 25px; }
-    .stat-card { padding: 18px; border-radius: 14px; color: #fff; box-shadow: 0 6px 16px rgba(0,0,0,0.25); display: flex; flex-direction: column; justify-content: space-between; transition: transform 0.2s; }
-    .stat-card:hover { transform: translateY(-3px); }
-    .stat-card.blue { background: linear-gradient(135deg, #3b82f6, #1d4ed8); }
-    .stat-card.purple { background: linear-gradient(135deg, #a855f7, #6b21a8); }
-    .stat-card.pink { background: linear-gradient(135deg, #ec4899, #be185d); }
-    .stat-card.emerald { background: linear-gradient(135deg, #10b981, #047857); }
-    .stat-card h4 { margin: 0 0 6px 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.9; }
-    .stat-card .num { font-size: 28px; font-weight: bold; margin-bottom: 12px; }
-    .card-action-btn { background: rgba(255, 255, 255, 0.2); border: 1px solid rgba(255, 255, 255, 0.4); color: #fff; padding: 6px 12px; border-radius: 8px; font-size: 12px; font-weight: bold; cursor: pointer; text-align: center; transition: background 0.2s; }
-    .card-action-btn:hover { background: rgba(255, 255, 255, 0.35); }
-    .card { background: #0f172a; border: 1px solid #334155; border-radius: 12px; padding: 16px; margin-bottom: 20px; }
-    h3 { color: #f1f5f9; margin-top: 0; border-bottom: 2px solid #334155; padding-bottom: 8px; font-size: 16px; }
-    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; align-items: end; }
-    .form-group { display: flex; flex-direction: column; gap: 6px; }
-    .form-group label { font-weight: 600; font-size: 12px; color: #94a3b8; }
-    .form-group input, .form-group select, .form-group textarea { padding: 10px 12px; background: #1e293b; border: 1px solid #475569; color: #f8fafc; border-radius: 8px; font-size: 14px; outline: none; width: 100%; }
-    button { padding: 10px 14px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; font-size: 14px; transition: transform 0.1s; width: 100%; }
-    button:active { transform: scale(0.97); }
-    button.primary { background: linear-gradient(135deg, #0ea5e9, #0284c7); color: #fff; }
-    button.secondary { background: linear-gradient(135deg, #64748b, #475569); color: #fff; }
-    button.success { background: linear-gradient(135deg, #22c55e, #15803d); color: #fff; }
-    button.danger { background: linear-gradient(135deg, #ef4444, #b91c1c); color: #fff; }
-    button.whatsapp { background: linear-gradient(135deg, #25d366, #128c7e); color: #fff; }
-    button.purple-btn { background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: #fff; }
-    .table-responsive { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; min-width: 600px; }
-    th, td { border: 1px solid #334155; padding: 10px; text-align: left; }
-    th { background-color: #1e293b; font-weight: 600; color: #38bdf8; text-transform: uppercase; font-size: 11px; }
-    tr:nth-child(even) { background-color: rgba(30, 41, 59, 0.4); }
-    .badge { padding: 3px 8px; border-radius: 20px; font-size: 11px; font-weight: bold; display: inline-block; }
-    .badge.fb { background: #1d4ed8; color: #bfdbfe; }
-    .badge.ig { background: #be185d; color: #fce7f3; }
-    .badge.tk { background: #374151; color: #f3f4f6; border: 1px solid #6b7280; }
-    .chat-box { height: 280px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
-    .msg { padding: 8px 12px; border-radius: 8px; max-width: 85%; font-size: 13px; line-height: 1.4; word-break: break-word; }
-    .msg.customer { background: #334155; color: #f8fafc; align-self: flex-start; }
-    .msg.ai { background: #0284c7; color: #fff; align-self: flex-end; }
-    .chat-input-group { display: flex; flex-direction: column; gap: 8px; }
-    @media(min-width: 640px) {
-      .chat-input-group { flex-direction: row; }
-      body { padding: 20px; }
-      h2 { font-size: 24px; }
-    }
+    :root{--bg:#f4f6ff;--surface:#fff;--ink:#18213b;--muted:#74809b;--line:#e7eaf4;--primary:#635bff;--cyan:#12b8d6;--pink:#ec4899;--green:#10b981;--orange:#f59e0b;--shadow:0 14px 40px rgba(36,48,90,.08)}
+    *{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:22px}
+    body{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:radial-gradient(circle at 8% 4%,#e8eaff 0,transparent 28%),radial-gradient(circle at 95% 10%,#e0f7ff 0,transparent 25%),var(--bg);margin:0;padding:22px;color:var(--ink)}
+    .container{max-width:1440px;margin:0 auto 0 226px;background:transparent;padding:0;border:0;box-shadow:none}
+    .header-bar{background:rgba(255,255,255,.88);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:22px;padding:18px 22px;margin-bottom:22px;box-shadow:var(--shadow)}
+    .header-top{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:0}
+    h2{color:#252b55;margin:0;font-size:23px;letter-spacing:-.5px}h3{color:#283252;margin:0 0 16px;border:0;padding:0;font-size:17px;font-weight:800}h4{margin-bottom:10px}
+    .nav-buttons-scroll{position:fixed;z-index:50;left:18px;top:18px;bottom:18px;width:190px;display:flex;flex-direction:column;gap:8px;overflow-y:auto;white-space:normal;padding:18px 12px;background:linear-gradient(165deg,#282b63,#4443a8 55%,#287ca5);border-radius:22px;box-shadow:0 18px 45px rgba(39,42,105,.25)}
+    .nav-buttons-scroll:before{content:"LEAD MASTER";color:#c9d4ff;font-size:11px;font-weight:900;letter-spacing:2px;padding:5px 10px 15px}
+    .nav-btn{width:100%;flex:0 0 auto;text-align:left;background:transparent;color:#e7eaff;border:1px solid transparent;padding:12px 13px;border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;transition:.2s}
+    .nav-btn:hover,.nav-btn:focus,.nav-btn.active{background:rgba(255,255,255,.2);border-color:rgba(255,255,255,.24);color:#fff;transform:translateX(2px)}
+    .lang-btn{background:linear-gradient(135deg,#635bff,#9a5cff);color:#fff;border:0;padding:9px 15px;border-radius:12px;font-size:12px;font-weight:800;cursor:pointer;box-shadow:0 7px 16px #635bff33}
+    .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px;margin-bottom:22px}
+    .stat-card{padding:20px;border-radius:19px;color:#fff;box-shadow:0 12px 25px rgba(35,44,88,.13);display:flex;flex-direction:column;justify-content:space-between;min-height:145px;transition:.2s;overflow:hidden;position:relative}
+    .stat-card:hover{transform:translateY(-4px)}.stat-card.blue{background:linear-gradient(135deg,#4776f5,#6654df)}.stat-card.purple{background:linear-gradient(135deg,#a855f7,#713bd5)}.stat-card.pink{background:linear-gradient(135deg,#f472b6,#d94691)}.stat-card.emerald{background:linear-gradient(135deg,#19c79a,#079b83)}
+    .stat-card h4{margin:0 0 9px;font-size:12px;letter-spacing:.5px;opacity:.94}.stat-card .num{font-size:32px;font-weight:850;margin-bottom:12px}
+    .card-action-btn{background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.38);color:#fff;padding:8px 11px;border-radius:10px;font-size:12px;font-weight:750;cursor:pointer;text-align:center}
+    .card{background:rgba(255,255,255,.94);border:1px solid var(--line);border-radius:20px;padding:22px;margin-bottom:20px;box-shadow:var(--shadow);scroll-margin-top:20px}
+    .card:nth-of-type(odd){border-top:3px solid #7c75ff}.card:nth-of-type(even){border-top:3px solid #27b9ce}
+    .form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;align-items:end}.form-group{display:flex;flex-direction:column;gap:7px}.form-group label{font-weight:750;font-size:12px;color:#6b7590}
+    .form-group input,.form-group select,.form-group textarea,#chatPhoneInput,#chatMsgInput{padding:11px 13px;background:#f8f9ff;border:1px solid #dfe4f2;color:#202944;border-radius:11px;font-size:14px;outline:none;width:100%;transition:.2s}
+    .form-group input:focus,.form-group select:focus,.form-group textarea:focus,#chatPhoneInput:focus,#chatMsgInput:focus{border-color:#827aff;box-shadow:0 0 0 3px #827aff20;background:#fff}
+    button{padding:10px 14px;border:0;border-radius:10px;font-weight:800;cursor:pointer;font-size:13px;transition:transform .12s,filter .15s;width:100%}button:hover{filter:brightness(1.05)}button:active{transform:scale(.98)}
+    button.primary{background:linear-gradient(135deg,#4f7df3,#6256dc);color:#fff}button.secondary{background:linear-gradient(135deg,#8b96ad,#64718d);color:#fff}button.success{background:linear-gradient(135deg,#20c997,#079b78);color:#fff}button.danger{background:linear-gradient(135deg,#fb7185,#e04461);color:#fff}button.whatsapp{background:linear-gradient(135deg,#25d366,#128c7e);color:#fff}button.purple-btn{background:linear-gradient(135deg,#a855f7,#7046d8);color:#fff}
+    .table-responsive{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid var(--line);border-radius:13px}table{width:100%;border-collapse:collapse;margin:0;font-size:13px;min-width:620px}th,td{border-bottom:1px solid #edf0f7;padding:12px;text-align:left}th{background:#f3f5ff;font-weight:800;color:#5c63a5;text-transform:uppercase;font-size:10px;letter-spacing:.5px}tr:nth-child(even){background:#fbfcff}tr:hover{background:#f5f7ff}
+    .badge{padding:4px 9px;border-radius:20px;font-size:11px;font-weight:800;display:inline-block}.badge.fb{background:#e7efff;color:#2459c5}.badge.ig{background:#ffe8f3;color:#bd2872}.badge.tk{background:#edf0f4;color:#273044;border:1px solid #d9deea}
+    .chat-box{height:330px;background:linear-gradient(180deg,#f8f9ff,#f0f5ff);border:1px solid #e0e6f4;border-radius:15px;padding:15px;overflow-y:auto;display:flex;flex-direction:column;gap:10px;margin-bottom:13px}
+    .msg{padding:10px 13px;border-radius:14px;max-width:85%;font-size:13px;line-height:1.55;word-break:break-word;box-shadow:0 3px 10px rgba(31,46,90,.06)}.msg.customer{background:#fff;color:#34405c;align-self:flex-start;border:1px solid #e5eaf4}.msg.ai{background:linear-gradient(135deg,#665cf0,#398bdc);color:#fff;align-self:flex-end}
+    .chat-input-group{display:flex;flex-direction:column;gap:8px}.chat-input-group button{width:auto;white-space:nowrap;padding-left:22px;padding-right:22px}
+    #geminiKeyStatus{background:#f2f8ff;border:1px solid #dcecff;border-radius:11px;padding:10px 12px}
+    @media(min-width:640px){.chat-input-group{flex-direction:row;align-items:center}body{padding:22px}}
+    @media(max-width:820px){body{padding:10px}.container{margin:0}.header-bar{padding:15px;margin-bottom:14px}.nav-buttons-scroll{position:sticky;top:0;bottom:auto;left:auto;width:100%;height:auto;display:flex;flex-direction:row;gap:7px;overflow-x:auto;white-space:nowrap;padding:9px;margin:14px 0 0;border-radius:14px}.nav-buttons-scroll:before{display:none}.nav-btn{width:auto;text-align:center;flex:0 0 auto;padding:10px 12px;font-size:12px}.card{padding:16px;border-radius:16px}.stats-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.stat-card{padding:15px;min-height:128px}.stat-card .num{font-size:26px}h2{font-size:19px}}
+    @media(max-width:420px){.stats-grid{grid-template-columns:1fr 1fr}.stat-card h4{font-size:10px}.stat-card .num{font-size:23px}.header-top{align-items:flex-start}}
   </style>
 </head>
 <body>
-
-  <div class="container" id="mainApp">
+  <div id="authGate" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;background:linear-gradient(135deg,#20265b,#5147a8 55%,#1686a4)"><div style="width:min(430px,100%);background:#fff;border-radius:24px;padding:30px;box-shadow:0 25px 80px #11182766"><div style="font-size:12px;font-weight:900;letter-spacing:2px;color:#655cf3;margin-bottom:10px">AI LEAD MASTER</div><h2 id="authTitle" style="margin-bottom:8px">管理员登录</h2><p id="authHint" style="color:#71809b;font-size:13px;margin:0 0 20px">请登录后进入管理后台</p><form id="authForm" style="display:grid;gap:12px"><input id="authUsername" required minlength="3" placeholder="管理员用户名" style="padding:13px;border:1px solid #dce2f0;border-radius:12px;font-size:15px"><input id="authPassword" required type="password" placeholder="密码（至少 10 位）" style="padding:13px;border:1px solid #dce2f0;border-radius:12px;font-size:15px"><button id="authSubmit" class="primary" type="submit" style="padding:14px">登录</button></form><p id="authError" style="color:#dc3545;font-size:13px;min-height:20px;margin:12px 0 0"></p></div></div>
+  <div class="container" id="mainApp" style="display:none">
     <div class="header-bar" id="sec-dashboard">
       <div class="header-top">
         <h2>🚀 AI Lead Master CRM</h2>
         <div style="display: flex; align-items: center; gap: 10px;">
-          <button class="lang-btn" onclick="toggleLanguage()">🌐 EN / 中文</button>
+          <button class="lang-btn" onclick="toggleLanguage()">🌐 EN / 中文</button><button class="secondary" style="width:auto;padding:9px 12px" onclick="logoutAdmin()">退出登录</button>
           <span id="currentUserDisplay" style="font-weight: bold; color: #38bdf8; background: #0f172a; padding: 4px 8px; border-radius: 6px; font-size:12px; border: 1px solid #334155;">👤 Admin Mode</span>
         </div>
       </div>
@@ -502,6 +514,7 @@ app.get('/', (req, res) => {
         <button class="nav-btn" onclick="scrollToSec('sec-dashboard')" data-i18n="nav_dashboard">📊 仪表盘</button>
         <button class="nav-btn" onclick="scrollToSec('sec-ai-chat')" data-i18n="nav_ai">🤖 美业助理</button>
         <button class="nav-btn" onclick="scrollToSec('sec-ai-edit')" data-i18n="nav_edit_ai">✍️ 助理设置</button>
+        <button class="nav-btn" onclick="scrollToSec('sec-maps-leads')">🗺️ 地图商家</button>
         <button class="nav-btn" onclick="scrollToSec('sec-social-acc')" data-i18n="nav_social">👤 社媒配置</button>
         <button class="nav-btn" onclick="scrollToSec('sec-search-task')" data-i18n="nav_tasks">🌐 搜客任务</button>
         <button class="nav-btn" onclick="scrollToSec('sec-appointments')" data-i18n="nav_appts">📅 预约列表</button>
@@ -544,7 +557,7 @@ app.get('/', (req, res) => {
     <div class="card" id="sec-ai-chat" style="border: 1px solid #0ea5e9;">
       <h3 style="color: #38bdf8;" data-i18n="ai_title">🤖 智能美业助理与预约工作台</h3>
       <p style="font-size: 12px; color: #94a3b8; margin-bottom: 12px;" data-i18n="ai_desc">客户输入预约意向，助理将温柔解答并自动精准识别时间生成预约单！</p>
-
+      
       <div class="chat-box" id="chatLogsContainer">
         <div class="msg ai" id="aiWelcomeBox">👋 您好！我是您的专属美业助理，请问有什么我可以帮您的？</div>
       </div>
@@ -561,7 +574,6 @@ app.get('/', (req, res) => {
       <h3 style="color: #c084fc;" data-i18n="edit_ai_title">✍️ 自定义助理打招呼语与人设设置</h3>
       <form id="aiConfigForm" style="display:flex; flex-direction:column; gap:12px;">
         <div class="form-group">
-
           <label data-i18n="label_welcome">开场打招呼词 (Welcome Message)：</label>
           <input type="text" id="cfgWelcomeMsg" placeholder="例如: 您好！我是您的专属美业助理..." required>
         </div>
@@ -571,6 +583,18 @@ app.get('/', (req, res) => {
         </div>
         <button type="submit" class="purple-btn" style="width: auto; align-self: flex-start;" data-i18n="btn_save_config">💾 保存助理配置</button>
       </form>
+    </div>
+
+    <!-- Gemini API 配置状态：密钥仅在 Render 环境变量中管理 -->
+    <div class="card" id="sec-gemini-key" style="border:1px solid #10b981;">
+      <h3 style="color:#34d399;">🔐 Gemini AI 连接状态</h3>
+      <p style="font-size:13px;color:#64748b;">填写 API Key 后保存。密钥只发送到服务器并加密保存在数据库，不会显示在页面。</p>
+      <div class="form-grid" style="margin:14px 0;"><div class="form-group" style="grid-column:1/-1"><label>Gemini API Key</label><input id="geminiApiKeyInput" type="password" autocomplete="new-password" placeholder="粘贴 Google AI Studio API Key"></div><div style="display:flex;gap:8px;flex-wrap:wrap;grid-column:1/-1"><button type="button" class="primary" onclick="saveGeminiKey()">🔐 保存 API Key</button><button type="button" class="success" onclick="testGeminiKey()">🧪 测试连接</button><button type="button" class="secondary" onclick="checkGeminiStatus()">刷新状态</button></div></div>
+      <p id="geminiKeyStatus" style="margin-top:12px;color:#64748b;font-size:13px;">状态：等待检查</p>
+      <p style="margin-top:6px;color:#b45309;font-size:12px;">重要：Render 需配置持久磁盘保存 data.db，并设置固定 APP_ENCRYPTION_KEY；否则重启后后台保存的 Key 可能丢失或无法解密。</p>
+    </div>
+      <p id="geminiKeyStatus" style="margin-top:12px;color:#94a3b8;font-size:13px;">状态：等待检查</p>
+      <p style="margin-top:6px;color:#fbbf24;font-size:12px;">Render → ai-lead-backend-v3 → Environment：添加 GEMINI_API_KEY，Value 填入你的 Gemini Key，然后 Save Changes 等待重新部署。</p>
     </div>
 
     <!-- 👤 社媒配置 -->
@@ -722,12 +746,11 @@ app.get('/', (req, res) => {
         edit_ai_title: "✍️ Customize Assistant Greeting & Persona",
         label_welcome: "Welcome Greeting Message:",
         label_prompt: "Assistant Persona & Rules Prompt:",
-      },
-
         btn_save_config: "💾 Save Config",
         social_title: "👤 1. Social Media Accounts Isolation",
         platform_label: "Platform:",
         label_label: "Label:",
+        btn_bind_acc: "🔗 Bind Account",
         acc_list_title: "Authorized Accounts",
         th_platform: "Platform",
         th_label: "Label",
@@ -771,6 +794,7 @@ app.get('/', (req, res) => {
 
     function applyLanguage() {
       const dict = i18n[currentLang];
+      document.documentElement.lang = currentLang === "zh" ? "zh-CN" : "en";
       document.querySelectorAll("[data-i18n]").forEach(el => {
         const key = el.getAttribute("data-i18n");
         if (dict[key]) el.textContent = dict[key];
@@ -783,7 +807,7 @@ app.get('/', (req, res) => {
 
     function scrollToSec(id) {
       const el = document.getElementById(id);
-      if (el) el.scrollIntoView({ behavior: 'smooth' });
+      if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); document.querySelectorAll('.nav-btn').forEach(b=>b.classList.toggle('active', (b.getAttribute('onclick')||'').includes(id))); history.replaceState(null,'','#'+id); }
     }
 
     async function api(url, options = {}) {
@@ -799,10 +823,11 @@ app.get('/', (req, res) => {
       return data;
     }
 
-    window.addEventListener("DOMContentLoaded", () => {
-      applyLanguage();
-      loadAllData();
-    });
+    window.addEventListener("DOMContentLoaded", async () => { applyLanguage(); const st=await fetch('/api/auth/status').then(r=>r.json()).catch(()=>({setupRequired:true})); if(st.authenticated){enterAdmin(st.username);return;} document.getElementById('authTitle').textContent=st.setupRequired?'创建管理员账号':'管理员登录';document.getElementById('authHint').textContent=st.setupRequired?'首次使用，请创建管理员账号和密码，密码至少 10 位。':'请登录后进入管理后台';document.getElementById('authSubmit').textContent=st.setupRequired?'创建账号并进入后台':'登录';document.getElementById('authForm').dataset.mode=st.setupRequired?'setup':'login'; });
+    function enterAdmin(username){document.getElementById('authGate').style.display='none';document.getElementById('mainApp').style.display='block';document.getElementById('currentUserDisplay').textContent='👤 '+username;loadAllData();checkGeminiStatus();}
+    document.getElementById('authForm').addEventListener('submit',async e=>{e.preventDefault();const err=document.getElementById('authError');err.textContent='正在验证…';const mode=e.currentTarget.dataset.mode||'login';try{const r=await fetch('/api/auth/'+mode,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:document.getElementById('authUsername').value.trim(),password:document.getElementById('authPassword').value})});const d=await r.json();if(!r.ok)throw new Error(d.error||'登录失败');enterAdmin(d.username);}catch(x){err.textContent=x.message;}});
+    async function logoutAdmin(){await fetch('/api/auth/logout',{method:'POST'});location.reload();}
+
 
     async function loadAllData() {
       await loadAiConfig();
@@ -839,6 +864,25 @@ app.get('/', (req, res) => {
       } catch (err) { alert(err.message); }
     });
 
+    async function saveGeminiKey(){const input=document.getElementById('geminiApiKeyInput'),el=document.getElementById('geminiKeyStatus'),apiKey=input.value.trim();if(!apiKey){el.textContent='请先填写 Gemini API Key。';return;}el.textContent='正在加密保存…';try{const d=await api('/api/ai/key',{method:'POST',body:JSON.stringify({apiKey})});input.value='';el.textContent=d.message;await checkGeminiStatus();}catch(e){el.textContent='保存失败：'+e.message;}}
+
+    async function checkGeminiStatus() {
+      const el = document.getElementById('geminiKeyStatus');
+      try {
+        const result = await api('/api/ai/status');
+        el.textContent = result.configured ? ('状态：已配置 · 模型 ' + result.model) : '状态：未配置，请在 Render Environment 添加 GEMINI_API_KEY。';
+      } catch (e) { el.textContent = '状态检查失败：' + e.message; }
+    }
+    async function testGeminiKey() {
+      const el = document.getElementById('geminiKeyStatus');
+      el.textContent = '正在测试 Gemini，请稍候…';
+      try {
+        const result = await api('/api/ai/key-test', { method: 'POST', body: JSON.stringify({}) });
+        el.textContent = '状态：连接成功 · ' + result.preview;
+        alert(result.message);
+      } catch (e) { el.textContent = '状态：连接失败 · ' + e.message; alert(e.message); }
+    }
+
     async function sendAiMessage() {
       const phoneInput = document.getElementById("chatPhoneInput");
       const msgInput = document.getElementById("chatMsgInput");
@@ -862,7 +906,7 @@ app.get('/', (req, res) => {
 
         const aiDiv = document.createElement("div");
         aiDiv.className = "msg ai";
-        aiDiv.textContent = res.ai_reply;
+        aiDiv.textContent = (res.detected_language ? "[" + (currentLang === 'en' ? "Detected: " : "识别语言：") + res.detected_language + "]\n" : "") + res.ai_reply;
         container.appendChild(aiDiv);
         container.scrollTop = container.scrollHeight;
 
@@ -883,7 +927,6 @@ app.get('/', (req, res) => {
     }
 
     async function loadChatLogs() {
-
       const container = document.getElementById("chatLogsContainer");
       try {
         const logs = await api("/api/ai/chat-logs");
@@ -1083,7 +1126,7 @@ app.get('/', (req, res) => {
 </body>
 </html>`);
 });
- 
+
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
 });
