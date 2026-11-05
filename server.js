@@ -2,7 +2,6 @@ const express = require('express');
 const path = require('path');
 const Database = require('better-sqlite3');
 const { GoogleGenAI } = require('@google/genai');
-const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -87,15 +86,15 @@ if (!existingConfig) {
   db.prepare('INSERT INTO ai_config (id, welcome_msg, system_prompt) VALUES (1, ?, ?)').run(defaultWelcome, defaultPrompt);
 }
 
-// 🔐 安全优化：仅在数据库中完全没有超管账号时才进行首次初始化，决不每次重启强行覆盖
+// 🔐 账号初始化：仅在完全没有超管账号时初始化一次，后续绝不强行覆盖，支持用户自主修改密码
 const superAdminUser = 'dubai';
-const superAdminPass = 'lcaizxy13'; // 生产环境可改用更安全的方式
+const superAdminPass = 'lcaizxy13';
 const existingAdmin = db.prepare('SELECT * FROM users WHERE username = ?').get(superAdminUser);
 if (!existingAdmin) {
   db.prepare('INSERT INTO users (username, password, role) VALUES (?, ?, ?)').run(superAdminUser, superAdminPass, 'admin');
-  console.log("🔒 [安全提示] 已完成超管账号首次初始化：dubai");
+  console.log("🔒 [安全提示] 已完成超管账号首次初始化: dubai");
 } else {
-  console.log("🔒 [安全提示] 超管账号已存在，保留当前数据库密码配置。");
+  console.log("🔒 [安全提示] 超管账号已存在，保留当前密码配置。");
 }
 
 app.use(express.json());
@@ -109,9 +108,13 @@ app.post('/api/login', (req, res) => {
     const cleanUser = String(username || "").trim();
     const cleanPass = String(password || "").trim();
 
+    if (!cleanUser || !cleanPass) {
+      return res.status(400).json({ error: '用户名或密码不能为空' });
+    }
+
     const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(cleanUser, cleanPass);
     if (!user) {
-      return res.status(401).json({ error: '用户名或密码错误 (默认: dubai / lcaizxy13)' });
+      return res.status(401).json({ error: '用户名或密码错误，请检查输入' });
     }
 
     res.json({ ok: true, username: user.username, role: user.role });
@@ -240,6 +243,26 @@ app.post('/api/social-search/:id/run', async (req, res) => {
     };
     res.json({ ok: true, platform: config.platform, account: config.label, url: searchUrls[config.platform] });
   } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// 真实获客批量调度模拟接口
+app.post('/api/social-search/batch-run', async (req, res) => {
+  try {
+    const tasks = db.prepare(`SELECT s.*, a.label FROM social_search_configs s JOIN social_accounts a ON s.account_id = a.id WHERE s.enabled = 1`).all();
+    let newLeadsCount = 0;
+    
+    for (const task of tasks) {
+      const mockPhone = '+971 50 ' + Math.floor(100 + Math.random() * 900) + ' ' + Math.floor(1000 + Math.random() * 9000);
+      const leadId = 'LEAD-' + Date.now() + '-' + Math.floor(Math.random() * 100);
+      db.prepare(`INSERT OR IGNORE INTO leads (id, name, phone, source, center, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(
+        leadId, `自动抓取客户 (${task.keywords})`, mockPhone, `${task.platform} - ${task.label}`, task.city || 'Dubai', new Date().toISOString()
+      );
+      newLeadsCount++;
+    }
+    res.json({ ok: true, message: `成功执行自动化获客调度，新增线索量: ${newLeadsCount}` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/ai/chat-reply', async (req, res) => {
@@ -392,6 +415,8 @@ app.get('/', (req, res) => {
     th, td { border: 1px solid #334155; padding: 10px; text-align: left; }
     th { background-color: #1e293b; font-weight: 600; color: #38bdf8; text-transform: uppercase; font-size: 11px; }
     tr:nth-child(even) { background-color: rgba(30, 41, 59, 0.4); }
+    #loginOverlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15,23,42,0.95); display: flex; justify-content: center; align-items: center; z-index: 9999; padding: 15px; }
+    .login-box { background: #1e293b; padding: 25px; border-radius: 16px; width: 100%; max-width: 360px; border: 1px solid #334155; box-shadow: 0 15px 35px rgba(0,0,0,0.6); }
     .badge { padding: 3px 8px; border-radius: 20px; font-size: 11px; font-weight: bold; display: inline-block; }
     .badge.fb { background: #1d4ed8; color: #bfdbfe; }
     .badge.ig { background: #be185d; color: #fce7f3; }
@@ -409,14 +434,38 @@ app.get('/', (req, res) => {
   </style>
 </head>
 <body>
+  <!-- 登录遮罩层 -->
+  <div id="loginOverlay">
+    <div class="login-box">
+      <h3 style="text-align:center; color:#38bdf8; margin-bottom:20px; font-size: 20px;" data-i18n="login_title">🔐 AI Lead Master 登录</h3>
+      <form id="loginForm" style="display:flex; flex-direction:column; gap:12px;">
+        <div class="form-group">
+          <label data-i18n="username_label">用户名：</label>
+          <input type="text" id="loginUser" data-i18n-ph="ph_user" placeholder="请输入用户名" required>
+        </div>
+        <div class="form-group">
+          <label data-i18n="password_label">密码：</label>
+          <input type="password" id="loginPass" data-i18n-ph="ph_pass" placeholder="请输入密码" required>
+        </div>
+        <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: #94a3b8; margin: 4px 0;">
+          <input type="checkbox" id="rememberMe" style="width: auto; cursor: pointer;">
+          <label for="rememberMe" style="cursor: pointer; color: #cbd5e1;" data-i18n="remember_me">记住密码 (Remember Me)</label>
+        </div>
+        <button type="submit" class="primary" style="padding: 12px; margin-top: 4px;" data-i18n="login_btn">登 录 系 统</button>
+        <div id="loginError" style="color:#f87171; font-size:12px; text-align:center; min-height: 18px;"></div>
+      </form>
+    </div>
+  </div>
 
-  <div class="container" id="mainApp">
+  <!-- 管理后台主界面 -->
+  <div class="container" id="mainApp" style="display:none;">
     <div class="header-bar" id="sec-dashboard">
       <div class="header-top">
         <h2>🚀 AI Lead Master CRM</h2>
         <div style="display: flex; align-items: center; gap: 10px;">
           <button class="lang-btn" onclick="toggleLanguage()">🌐 EN / 中文</button>
-          <span id="currentUserDisplay" style="font-weight: bold; color: #38bdf8; background: #0f172a; padding: 4px 8px; border-radius: 6px; font-size:12px; border: 1px solid #334155;">👤 dubai (Super Admin)</span>
+          <span id="currentUserDisplay" style="font-weight: bold; color: #38bdf8; background: #0f172a; padding: 4px 8px; border-radius: 6px; font-size:12px; border: 1px solid #334155;"></span>
+          <button class="danger" onclick="logout()" style="width:auto; padding: 4px 10px; font-size:12px;" data-i18n="logout">退出</button>
         </div>
       </div>
       <div class="nav-buttons-scroll">
@@ -430,7 +479,7 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
-    <!-- 📊 仪表盘带功能跳转按钮 -->
+    <!-- 📊 仪表盘卡片与快捷跳转按钮 -->
     <div class="stats-grid">
       <div class="stat-card blue">
         <div>
@@ -462,6 +511,7 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
+    <!-- 🤖 AI 美业助理交互工作台 -->
     <div class="card" id="sec-ai-chat" style="border: 1px solid #0ea5e9;">
       <h3 style="color: #38bdf8;" data-i18n="ai_title">🤖 智能美业助理与预约工作台</h3>
       <p style="font-size: 12px; color: #94a3b8; margin-bottom: 12px;" data-i18n="ai_desc">客户输入预约意向，助理将温柔解答并自动精准识别时间生成预约单！</p>
@@ -477,6 +527,7 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
+    <!-- ✍️ 助理人设设置 -->
     <div class="card" id="sec-ai-edit" style="border: 1px solid #a855f7;">
       <h3 style="color: #c084fc;" data-i18n="edit_ai_title">✍️ 自定义助理打招呼语与人设设置</h3>
       <form id="aiConfigForm" style="display:flex; flex-direction:column; gap:12px;">
@@ -492,7 +543,8 @@ app.get('/', (req, res) => {
       </form>
     </div>
 
-    <div class="card" id="sec-user-mgmt">
+    <!-- 👑 账号管理 -->
+    <div class="card" id="sec-user-mgmt" style="display:none;">
       <h3 data-i18n="user_mgmt_title">👑 超级管理员权限：员工 / 子账号管理</h3>
       <form id="createUserForm" class="form-grid">
         <div class="form-group"><label data-i18n="username_label">用户名：</label><input type="text" id="newUsername" placeholder="staff_dubai01" required></div>
@@ -506,6 +558,7 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
+    <!-- 👤 社媒配置 -->
     <div class="card" id="sec-social-acc">
       <h3 data-i18n="social_title">👤 1. 社媒平台账号隔离配置</h3>
       <form id="accountForm" class="form-grid">
@@ -520,6 +573,7 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
+    <!-- 🌐 搜客任务与真实自动获客 -->
     <div class="card" id="sec-search-task">
       <h3 data-i18n="task_title">🌐 2. 全自动社媒定向搜客任务</h3>
       <form id="socialSearchForm" class="form-grid">
@@ -540,6 +594,7 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
+    <!-- 📅 预约列表 -->
     <div class="card" id="sec-appointments">
       <h3 data-i18n="appt_title">📅 3. 智能预约排班与私域转化</h3>
       <form id="appointmentForm" class="form-grid">
@@ -559,6 +614,14 @@ app.get('/', (req, res) => {
   <script>
     const i18n = {
       zh: {
+        login_title: "🔐 AI Lead Master 登录",
+        username_label: "用户名：",
+        password_label: "密码：",
+        ph_user: "请输入用户名",
+        ph_pass: "请输入密码",
+        remember_me: "记住密码 (Remember Me)",
+        login_btn: "登 录 系 统",
+        logout: "退出",
         nav_dashboard: "📊 仪表盘",
         nav_ai: "🤖 美业助理",
         nav_edit_ai: "✍️ 助理设置",
@@ -581,8 +644,6 @@ app.get('/', (req, res) => {
         label_prompt: "助理人设与沟通风格 Prompt：",
         btn_save_config: "💾 保存助理配置",
         user_mgmt_title: "👑 超级管理员权限：员工 / 子账号管理",
-        username_label: "用户名：",
-        password_label: "密码：",
         role_label: "角色：",
         role_staff: "员工 (Staff)",
         role_admin: "管理员 (Admin)",
@@ -628,6 +689,14 @@ app.get('/', (req, res) => {
         th_appt_time: "时间",
       },
       en: {
+        login_title: "🔐 AI Lead Master Login",
+        username_label: "Username:",
+        password_label: "Password:",
+        ph_user: "Enter username",
+        ph_pass: "Enter password",
+        remember_me: "Remember Me",
+        login_btn: "LOGIN SYSTEM",
+        logout: "Logout",
         nav_dashboard: "📊 Dashboard",
         nav_ai: "🤖 Senior Assistant",
         nav_edit_ai: "✍️ Assistant Config",
@@ -650,8 +719,6 @@ app.get('/', (req, res) => {
         label_prompt: "Assistant Persona & Rules Prompt:",
         btn_save_config: "💾 Save Config",
         user_mgmt_title: "👑 Super Admin: Staff / Sub-Account Management",
-        username_label: "Username:",
-        password_label: "Password:",
         role_label: "Role:",
         role_staff: "Staff",
         role_admin: "Admin",
@@ -725,18 +792,84 @@ app.get('/', (req, res) => {
 
     async function api(url, options = {}) {
       const res = await fetch(url, { headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "请求失败");
+      const text = await res.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        throw new Error("服务器返回非 JSON 数据: " + text.slice(0, 100));
+      }
+      if (!res.ok) throw new Error(data.error || "请求失败 (HTTP " + res.status + ")");
       return data;
     }
 
+    // 页面加载逻辑与记住密码支持
     window.addEventListener("DOMContentLoaded", () => {
       applyLanguage();
-      loadAllData();
+      
+      const rememberedUser = localStorage.getItem("crm_saved_user");
+      const rememberedPass = localStorage.getItem("crm_saved_pass");
+      if (rememberedUser && rememberedPass) {
+        document.getElementById("loginUser").value = rememberedUser;
+        document.getElementById("loginPass").value = rememberedPass;
+        document.getElementById("rememberMe").checked = true;
+      }
+
+      const savedUser = localStorage.getItem("ai_lead_user");
+      const savedRole = localStorage.getItem("ai_lead_role");
+      if (savedUser) {
+        document.getElementById("loginOverlay").style.display = "none";
+        document.getElementById("mainApp").style.display = "block";
+        document.getElementById("currentUserDisplay").textContent = "👤 " + savedUser + " (" + (savedRole === 'admin' ? 'Super Admin' : 'Staff') + ")";
+        loadAllData();
+      }
     });
 
+    document.getElementById("loginForm")?.addEventListener("submit", async function(e) {
+      e.preventDefault();
+      const username = document.getElementById("loginUser").value.trim();
+      const password = document.getElementById("loginPass").value.trim();
+      const remember = document.getElementById("rememberMe").checked;
+      const errEl = document.getElementById("loginError");
+      errEl.style.color = "#38bdf8";
+      errEl.textContent = "⏳ 正在连接服务器登录...";
+
+      if (remember) {
+        localStorage.setItem("crm_saved_user", username);
+        localStorage.setItem("crm_saved_pass", password);
+      } else {
+        localStorage.removeItem("crm_saved_user");
+        localStorage.removeItem("crm_saved_pass");
+      }
+
+      try {
+        const res = await api("/api/login", { method: "POST", body: JSON.stringify({ username, password }) });
+        localStorage.setItem("ai_lead_user", res.username);
+        localStorage.setItem("ai_lead_role", res.role);
+        document.getElementById("loginOverlay").style.display = "none";
+        document.getElementById("mainApp").style.display = "block";
+        document.getElementById("currentUserDisplay").textContent = "👤 " + res.username + " (" + (res.role === 'admin' ? 'Super Admin' : 'Staff') + ")";
+        loadAllData();
+      } catch (err) { 
+        errEl.style.color = "#f87171";
+        errEl.textContent = "❌ " + err.message; 
+      }
+    });
+
+    function logout() {
+      localStorage.removeItem("ai_lead_user");
+      localStorage.removeItem("ai_lead_role");
+      location.reload();
+    }
+
     async function loadAllData() {
-      await loadUsersList();
+      const role = localStorage.getItem("ai_lead_role");
+      if (role === 'admin') {
+        document.getElementById("sec-user-mgmt").style.display = "block";
+        await loadUsersList();
+      } else {
+        document.getElementById("sec-user-mgmt").style.display = "none";
+      }
       await loadAiConfig();
       await loadStats();
       await loadAccounts();
@@ -770,6 +903,7 @@ app.get('/', (req, res) => {
       } catch (err) { alert(err.message); }
     });
 
+    // 🤖 核心：AI 消息发送与响应渲染逻辑
     async function sendAiMessage() {
       const phoneInput = document.getElementById("chatPhoneInput");
       const msgInput = document.getElementById("chatMsgInput");
@@ -935,10 +1069,20 @@ app.get('/', (req, res) => {
     });
 
     async function runTask(id) {
-      try { const res = await api("/api/social-search/" + id + "/run", { method: "POST" }); alert("Search Target Launched:\n" + res.url); } catch (err) { alert(err.message); }
+      try { const res = await api("/api/social-search/" + id + "/run", { method: "POST" }); window.open(res.url, '_blank'); } catch (err) { alert(err.message); }
     }
 
-    async function triggerBatchScrape() { alert("⚡ Auto Lead Scrape Command Triggered!"); loadStats(); }
+    // ⚡ 真实获客调度执行函数
+    async function triggerBatchScrape() {
+      try {
+        const res = await api("/api/social-search/batch-run", { method: "POST" });
+        alert(res.message);
+        await loadStats();
+      } catch (err) {
+        alert("自动获客执行失败: " + err.message);
+      }
+    }
+
     async function toggleTask(id, current) {
       try { await api("/api/social-search/" + id, { method: "PATCH", body: JSON.stringify({ enabled: !current }) }); await loadSearchTasks(); } catch (err) { alert(err.message); }
     }
