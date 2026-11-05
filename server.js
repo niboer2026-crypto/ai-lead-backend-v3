@@ -116,48 +116,13 @@ if (!existingConfig) {
 
 app.use(express.json());
 
-// Gemini 配置：密钥加密保存在服务器 SQLite 中；后台修改接口由 AI_SETTINGS_PASSWORD 保护。
+// Gemini 配置：不使用后台密码；API Key 仅从 Render 环境变量读取。
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-const AI_SETTINGS_PASSWORD = String(process.env.AI_SETTINGS_PASSWORD || "");
 let apiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "").trim();
 let ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
-function encryptionKey() {
-  if (!AI_SETTINGS_PASSWORD) return null;
-  return crypto.scryptSync(AI_SETTINGS_PASSWORD, 'ai-lead-master-gemini-key-v1', 32);
-}
-function encryptApiKey(value) {
-  const key = encryptionKey();
-  if (!key) throw new Error('请先在 Render 环境变量中设置 AI_SETTINGS_PASSWORD，再保存 Gemini Key。');
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-  const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
-  return { encrypted_key: encrypted.toString('base64'), iv: iv.toString('base64'), auth_tag: cipher.getAuthTag().toString('base64') };
-}
-function decryptApiKey(row) {
-  const key = encryptionKey();
-  if (!key || !row) return '';
-  try {
-    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(row.iv, 'base64'));
-    decipher.setAuthTag(Buffer.from(row.auth_tag, 'base64'));
-    return Buffer.concat([decipher.update(Buffer.from(row.encrypted_key, 'base64')), decipher.final()]).toString('utf8');
-  } catch (e) { console.error('[Gemini] 无法解密已保存的 Key，请检查 AI_SETTINGS_PASSWORD 是否变化。'); return ''; }
-}
-function loadStoredGeminiKey() {
-  try {
-    const row = db.prepare('SELECT encrypted_key, iv, auth_tag FROM ai_secrets WHERE id = 1').get();
-    const saved = decryptApiKey(row);
-    if (saved) { apiKey = saved; ai = new GoogleGenAI({ apiKey }); }
-  } catch (e) { console.error('[Gemini key load]', e.message); }
-}
-loadStoredGeminiKey();
-function requireAiSettingsPassword(req, res, next) {
-  if (!AI_SETTINGS_PASSWORD) return res.status(503).json({ ok: false, error: '后台密钥设置尚未启用。请先在 Render 环境变量设置 AI_SETTINGS_PASSWORD。' });
-  const supplied = String(req.get('x-ai-settings-password') || '');
-  const a = Buffer.from(supplied); const b = Buffer.from(AI_SETTINGS_PASSWORD);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ ok: false, error: '后台设置密码不正确。' });
-  next();
-}
+// 不再从数据库读取或通过网页修改密钥，避免公开后台被他人替换 API Key。
+
 if (!apiKey) console.error('[Gemini] 尚未配置 API Key，可在后台 Gemini AI 设置中添加。');
 
 function getGeminiErrorMessage(err) {
@@ -173,41 +138,17 @@ function getGeminiErrorMessage(err) {
 
 // AI 连通性状态：前端可直接检查是否配置密钥（不返回密钥本身）
 app.get('/api/ai/status', (req, res) => {
-  res.json({ ok: true, provider: "Gemini", configured: !!apiKey && !!ai, model: GEMINI_MODEL, editable_in_dashboard: true });
+  res.json({ ok: true, provider: "Gemini", configured: !!apiKey && !!ai, model: GEMINI_MODEL, editable_in_dashboard: false });
 });
 
 
-// Gemini Key 后台设置：仅返回状态，不返回密钥；保存/测试/清除均需后台设置密码。
-app.get('/api/ai/key-status', requireAiSettingsPassword, (req, res) => {
-  res.json({ ok: true, configured: !!apiKey && !!ai, masked: apiKey ? '••••••••' + apiKey.slice(-4) : '', model: GEMINI_MODEL });
-});
-app.post('/api/ai/key', requireAiSettingsPassword, (req, res) => {
+// Gemini 连通性测试：只测试 Render 环境变量中的 Key，不接收或保存用户提交的密钥。
+app.post('/api/ai/key-test', async (req, res) => {
   try {
-    const value = String(req.body?.api_key || '').trim();
-    if (!value || value.length < 20 || value.length > 500) return res.status(400).json({ ok: false, error: '请输入有效的 Gemini API Key。' });
-    const encrypted = encryptApiKey(value);
-    db.prepare(`INSERT INTO ai_secrets (id, encrypted_key, iv, auth_tag, updated_at) VALUES (1, ?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(id) DO UPDATE SET encrypted_key=excluded.encrypted_key, iv=excluded.iv, auth_tag=excluded.auth_tag, updated_at=CURRENT_TIMESTAMP`)
-      .run(encrypted.encrypted_key, encrypted.iv, encrypted.auth_tag);
-    apiKey = value; ai = new GoogleGenAI({ apiKey });
-    res.json({ ok: true, configured: true, masked: '••••••••' + apiKey.slice(-4), message: 'Gemini Key 已加密保存并启用。' });
-  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
-});
-app.post('/api/ai/key-test', requireAiSettingsPassword, async (req, res) => {
-  try {
-    const candidate = String(req.body?.api_key || apiKey || '').trim();
-    if (!candidate) return res.status(400).json({ ok: false, error: '请先输入或保存 Gemini API Key。' });
-    const client = new GoogleGenAI({ apiKey: candidate });
-    const result = await client.models.generateContent({ model: GEMINI_MODEL, contents: 'Reply with the single word OK.' });
+    if (!apiKey || !ai) return res.status(503).json({ ok: false, error: '服务器尚未配置 GEMINI_API_KEY。请先在 Render Environment 中添加后重新部署。' });
+    const result = await ai.models.generateContent({ model: GEMINI_MODEL, contents: 'Reply with the single word OK.' });
     res.json({ ok: true, message: '连接成功，Gemini 已正常响应。', preview: String(result.text || '').slice(0, 80) });
   } catch (err) { res.status(502).json({ ok: false, error: getGeminiErrorMessage(err) }); }
-});
-app.delete('/api/ai/key', requireAiSettingsPassword, (req, res) => {
-  try {
-    db.prepare('DELETE FROM ai_secrets WHERE id = 1').run();
-    apiKey = ''; ai = null;
-    res.json({ ok: true, configured: false, message: 'Gemini Key 已清除。' });
-  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
 });
 
 // AI 配置 API
@@ -558,7 +499,6 @@ app.get('/', (req, res) => {
         <button class="nav-btn" onclick="scrollToSec('sec-social-acc')" data-i18n="nav_social">👤 社媒配置</button>
         <button class="nav-btn" onclick="scrollToSec('sec-search-task')" data-i18n="nav_tasks">🌐 搜客任务</button>
         <button class="nav-btn" onclick="scrollToSec('sec-appointments')" data-i18n="nav_appts">📅 预约列表</button>
-        <button class="nav-btn" onclick="scrollToSec('sec-gemini-key')">🔐 Gemini 设置</button>
       </div>
     </div>
 
@@ -626,24 +566,16 @@ app.get('/', (req, res) => {
       </form>
     </div>
 
-    <!-- 🔐 Gemini API Key 设置 -->
+    <!-- Gemini API 配置状态：密钥仅在 Render 环境变量中管理 -->
     <div class="card" id="sec-gemini-key" style="border:1px solid #10b981;">
-      <h3 style="color:#34d399;">🔐 Gemini AI 密钥设置</h3>
-      <p style="font-size:13px;color:#94a3b8;">在这里添加或更换 Gemini API Key。密钥会在服务器端加密保存，页面不会读取已保存的完整密钥。</p>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:12px 0;">
-        <input id="geminiSettingsPassword" type="password" autocomplete="current-password" placeholder="后台密钥设置密码（AI_SETTINGS_PASSWORD）" style="flex:1;min-width:220px;padding:11px;background:#1e293b;border:1px solid #475569;color:#fff;border-radius:8px;">
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-        <input id="geminiApiKeyInput" type="password" autocomplete="off" placeholder="粘贴新的 Gemini API Key" style="flex:1;min-width:240px;padding:11px;background:#1e293b;border:1px solid #475569;color:#fff;border-radius:8px;">
-        <button type="button" class="primary" onclick="toggleGeminiKeyVisibility()">显示/隐藏</button>
-      </div>
+      <h3 style="color:#34d399;">🔐 Gemini AI 连接状态</h3>
+      <p style="font-size:13px;color:#94a3b8;">本系统不需要后台密钥密码。为保护密钥，Gemini API Key 只在 Render 的 Environment 中设置，不在网页中输入或保存。</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
-        <button type="button" class="primary" onclick="saveGeminiKey()">💾 保存密钥</button>
-        <button type="button" class="primary" onclick="testGeminiKey()">🧪 测试连接</button>
-        <button type="button" class="danger" onclick="clearGeminiKey()">🗑️ 清除密钥</button>
+        <button type="button" class="primary" onclick="testGeminiKey()">🧪 测试 Gemini 连接</button>
+        <button type="button" class="primary" onclick="checkGeminiStatus()">刷新状态</button>
       </div>
       <p id="geminiKeyStatus" style="margin-top:12px;color:#94a3b8;font-size:13px;">状态：等待检查</p>
-      <p style="margin-top:6px;color:#fbbf24;font-size:12px;">首次使用前，需在 Render 环境变量中设置 AI_SETTINGS_PASSWORD（自定义后台设置密码），然后重新部署。请不要把密码或 API Key 发到聊天里。</p>
+      <p style="margin-top:6px;color:#fbbf24;font-size:12px;">Render → ai-lead-backend-v3 → Environment：添加 GEMINI_API_KEY，Value 填入你的 Gemini Key，然后 Save Changes 等待重新部署。</p>
     </div>
 
     <!-- 👤 社媒配置 -->
@@ -912,38 +844,21 @@ app.get('/', (req, res) => {
       } catch (err) { alert(err.message); }
     });
 
-    function geminiAdminHeaders() {
-      return { 'x-ai-settings-password': document.getElementById('geminiSettingsPassword').value };
-    }
-    function toggleGeminiKeyVisibility() {
-      const el = document.getElementById('geminiApiKeyInput');
-      el.type = el.type === 'password' ? 'text' : 'password';
-    }
-    async function saveGeminiKey() {
-      const key = document.getElementById('geminiApiKeyInput').value.trim();
-      if (!key) return alert('请先粘贴 Gemini API Key。');
+    async function checkGeminiStatus() {
+      const el = document.getElementById('geminiKeyStatus');
       try {
-        const result = await api('/api/ai/key', { method: 'POST', headers: geminiAdminHeaders(), body: JSON.stringify({ api_key: key }) });
-        document.getElementById('geminiApiKeyInput').value = '';
-        document.getElementById('geminiKeyStatus').textContent = '状态：已保存并启用（' + result.masked + '）';
-        alert(result.message);
-      } catch (e) { alert(e.message); }
+        const result = await api('/api/ai/status');
+        el.textContent = result.configured ? ('状态：已配置 · 模型 ' + result.model) : '状态：未配置，请在 Render Environment 添加 GEMINI_API_KEY。';
+      } catch (e) { el.textContent = '状态检查失败：' + e.message; }
     }
     async function testGeminiKey() {
-      const key = document.getElementById('geminiApiKeyInput').value.trim();
+      const el = document.getElementById('geminiKeyStatus');
+      el.textContent = '正在测试 Gemini，请稍候…';
       try {
-        const result = await api('/api/ai/key-test', { method: 'POST', headers: geminiAdminHeaders(), body: JSON.stringify({ api_key: key }) });
-        document.getElementById('geminiKeyStatus').textContent = '状态：连接成功 · ' + result.preview;
+        const result = await api('/api/ai/key-test', { method: 'POST', body: JSON.stringify({}) });
+        el.textContent = '状态：连接成功 · ' + result.preview;
         alert(result.message);
-      } catch (e) { document.getElementById('geminiKeyStatus').textContent = '状态：连接失败 · ' + e.message; alert(e.message); }
-    }
-    async function clearGeminiKey() {
-      if (!confirm('确定清除已保存的 Gemini API Key 吗？')) return;
-      try {
-        const result = await api('/api/ai/key', { method: 'DELETE', headers: geminiAdminHeaders() });
-        document.getElementById('geminiKeyStatus').textContent = '状态：未配置';
-        alert(result.message);
-      } catch (e) { alert(e.message); }
+      } catch (e) { el.textContent = '状态：连接失败 · ' + e.message; alert(e.message); }
     }
 
     async function sendAiMessage() {
