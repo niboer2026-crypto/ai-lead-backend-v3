@@ -8,7 +8,6 @@ async function api(url, options = {}) {
   return data;
 }
 
-// 登录
 document.getElementById("loginForm")?.addEventListener("submit", async function(e) {
   e.preventDefault();
   const username = document.getElementById("loginUser").value;
@@ -67,7 +66,6 @@ async function loadAllData() {
   await loadSearchTasks();
 }
 
-// 0. 超级管理员开通/删除子账号
 async function loadUsersList() {
   const tbody = document.getElementById("usersTableList");
   if (!tbody) return;
@@ -106,14 +104,13 @@ document.getElementById("createUserForm")?.addEventListener("submit", async func
 });
 
 async function deleteUser(id) {
-  if (!confirm("确定注销该账号吗？注销后该员工将无法再登录系统")) return;
+  if (!confirm("确定注销该账号吗？")) return;
   try {
     await api(`/api/admin/users/${id}`, { method: "DELETE" });
     await loadUsersList();
   } catch (err) { alert(err.message); }
 }
 
-// 统计看板
 async function loadStats() {
   try {
     const s = await api("/api/dashboard/stats");
@@ -124,7 +121,6 @@ async function loadStats() {
   } catch (e) { console.error(e); }
 }
 
-// 1. 社媒账号绑定
 async function loadAccounts() {
   const tbody = document.getElementById("accountTableList");
   const sel = document.getElementById("ssAccount");
@@ -194,7 +190,6 @@ document.getElementById("ssAccount")?.addEventListener("change", function() {
   }
 });
 
-// 2. 自动获客任务
 async function loadSearchTasks() {
   const tbody = document.getElementById("socialSearchList");
   if (!tbody) return;
@@ -271,7 +266,6 @@ async function deleteTask(id) {
   } catch (err) { alert(err.message); }
 }
 
-// 3. 预约排班
 async function loadAppointments() {
   const tbody = document.getElementById("appointmentList");
   if (!tbody) return;
