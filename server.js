@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const { GoogleGenAI } = require('@google/genai');
@@ -8,8 +9,30 @@ const { GoogleGenAI } = require('@google/genai');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// 初始化本地 SQLite 数据库
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data.db');
+// 数据库路径准备；可选的一次性重建会先备份，再清空数据库。
+// 默认绝不删除数据库。只有显式设置 DB_RESET_ON_START=true 和确认短语才会执行一次。
+const DB_PATH = path.resolve(process.env.DB_PATH || path.join(__dirname, 'data.db'));
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+const RESET_MARKER = `${DB_PATH}.reset-completed`;
+const resetRequested = String(process.env.DB_RESET_ON_START || '').toLowerCase() === 'true';
+const resetConfirmed = process.env.DB_RESET_CONFIRM === 'I_UNDERSTAND_DATA_LOSS';
+if (resetRequested && resetConfirmed && !fs.existsSync(RESET_MARKER)) {
+  if (fs.existsSync(DB_PATH)) {
+    const backupPath = `${DB_PATH}.backup-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    fs.copyFileSync(DB_PATH, backupPath);
+    console.warn(`[DB] 旧数据库已备份到 ${backupPath}`);
+  }
+  for (const suffix of ['', '-wal', '-shm']) {
+    const file = DB_PATH + suffix;
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  }
+  fs.writeFileSync(RESET_MARKER, new Date().toISOString(), { flag: 'wx' });
+  console.warn('[DB] 已按显式确认执行一次性数据库重建；旧数据备份文件仍保留。');
+} else if (resetRequested && !resetConfirmed) {
+  console.warn('[DB] 忽略数据库重建：缺少 DB_RESET_CONFIRM=I_UNDERSTAND_DATA_LOSS。');
+} else if (resetRequested && fs.existsSync(RESET_MARKER)) {
+  console.log('[DB] 一次性重建标记已存在，本次启动不会再次清空数据库。');
+}
 const db = new Database(DB_PATH);
 console.log(`[DB] SQLite database: ${DB_PATH}`);
 
@@ -98,15 +121,16 @@ for (const [column, type] of [
 }
 try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_external_id ON leads(external_id) WHERE external_id IS NOT NULL'); } catch (e) {}
 
-// 清除旧版本自动获客演示代码生成的假线索；保留其他真实客户记录
-try {
-  db.prepare("DELETE FROM leads WHERE name LIKE '社媒潜在客户 (%' OR name LIKE '定向客户 (%'").run();
-} catch (e) { console.error('[Mock lead cleanup]', e.message); }
-
-// 🧹 自动清理：启动时自动清理 7 天前的旧聊天日志
-try {
-  db.exec(`DELETE FROM chat_logs WHERE datetime(created_at) < datetime('now', '-7 days');`);
-} catch (e) {}
+// 数据保留策略：只清理过期聊天日志，不自动删除客户线索、预约、账号或配置。
+// 默认保留 30 天；可通过 CHAT_LOG_RETENTION_DAYS 调整，设为 0 可关闭自动清理。
+const CHAT_LOG_RETENTION_DAYS = Math.max(0, Number.parseInt(process.env.CHAT_LOG_RETENTION_DAYS || '30', 10) || 0);
+if (CHAT_LOG_RETENTION_DAYS > 0) {
+  try {
+    const cleanup = db.prepare("DELETE FROM chat_logs WHERE datetime(created_at) < datetime('now', ?)");
+    const result = cleanup.run(`-${CHAT_LOG_RETENTION_DAYS} days`);
+    console.log(`[DB] 已清理 ${result.changes} 条超过 ${CHAT_LOG_RETENTION_DAYS} 天的聊天日志；客户和预约数据未删除。`);
+  } catch (e) { console.error('[DB cleanup]', e.message); }
+}
 
 const defaultWelcome = "👋 您好！我是您的专属美业助理，请问有什么我可以帮您的？";
 const defaultPrompt = "You are a senior beauty consultant & personal assistant for a high-end beauty brand in the Middle East (Dubai, Riyadh, Doha). Professional, warm, and attentive. Never call yourself AI Sales.";
@@ -119,12 +143,30 @@ if (!existingConfig) {
 app.use(express.json());
 
 // Admin first-run setup and signed-cookie authentication
-const AUTH_SECRET = process.env.APP_ENCRYPTION_KEY || process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
-if (!process.env.APP_ENCRYPTION_KEY && !process.env.SESSION_SECRET) console.warn('[Security] 请设置长期固定的 APP_ENCRYPTION_KEY；否则服务重启后会使登录会话失效，且后台保存的 Gemini Key 无法解密。');
+// 反向代理部署时信任代理头；密钥优先使用固定环境变量，否则保存到数据库旁边的文件。
+app.set('trust proxy', 1);
+const AUTH_SECRET_FILE = `${DB_PATH}.auth-secret`;
+let AUTH_SECRET = process.env.APP_ENCRYPTION_KEY || process.env.SESSION_SECRET;
+if (!AUTH_SECRET) {
+  try {
+    if (!fs.existsSync(AUTH_SECRET_FILE)) fs.writeFileSync(AUTH_SECRET_FILE, crypto.randomBytes(48).toString('hex'), { flag: 'wx', mode: 0o600 });
+    AUTH_SECRET = fs.readFileSync(AUTH_SECRET_FILE, 'utf8').trim();
+  } catch (e) {
+    throw new Error(`无法读取/创建登录会话密钥文件 ${AUTH_SECRET_FILE}: ${e.message}`);
+  }
+  console.warn('[Security] 未设置 APP_ENCRYPTION_KEY；已使用数据库目录中的持久化会话密钥。建议仍在部署平台设置固定 APP_ENCRYPTION_KEY。');
+}
 const COOKIE_NAME = 'alm_session';
+function setAuthCookie(res, token, maxAge = 604800) {
+  const forwardedProto = String(reqProtocolHint(res) || '').toLowerCase();
+  const secure = process.env.NODE_ENV === 'production' || forwardedProto === 'https';
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure ? '; Secure' : ''}`);
+  res.setHeader('Cache-Control', 'no-store');
+}
+function reqProtocolHint(res) { const forwarded = String(res.req?.headers?.['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase(); return forwarded || (res.req?.secure ? 'https' : 'http'); }
 function signToken(payload) { const body=Buffer.from(JSON.stringify(payload)).toString('base64url'); const sig=crypto.createHmac('sha256',AUTH_SECRET).update(body).digest('base64url'); return body+'.'+sig; }
 function verifyToken(token) { try { const [body,sig]=String(token||'').split('.'); const expected=crypto.createHmac('sha256',AUTH_SECRET).update(body).digest(); const actual=Buffer.from(sig,'base64url'); if(actual.length!==expected.length||!crypto.timingSafeEqual(actual,expected)) return null; const d=JSON.parse(Buffer.from(body,'base64url').toString()); return d.exp>Date.now()?d:null; } catch { return null; } }
-function getSession(req) { const c=String(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(COOKIE_NAME+'=')); return c?verifyToken(decodeURIComponent(c.slice(COOKIE_NAME.length+1))):null; }
+function getSession(req) { try { const c=String(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(COOKIE_NAME+'=')); const payload=c?verifyToken(decodeURIComponent(c.slice(COOKIE_NAME.length+1))):null; if(!payload?.username) return null; const user=db.prepare("SELECT id,username,role FROM users WHERE username = ? COLLATE NOCASE AND LOWER(COALESCE(role,'')) IN ('admin','superadmin','super_admin','owner') LIMIT 1").get(payload.username); return user ? { ...payload, userId:user.id, username:user.username, role:user.role } : null; } catch { return null; } }
 function hashPassword(password,salt=crypto.randomBytes(16).toString('hex')) { return {salt,hash:crypto.scryptSync(password,salt,64).toString('hex')}; }
 function checkPassword(password,salt,hash) { const a=crypto.scryptSync(password,salt,64), b=Buffer.from(hash,'hex'); return a.length===b.length&&crypto.timingSafeEqual(a,b); }
 
@@ -160,11 +202,56 @@ function bootstrapAdmin() {
   }
 }
 bootstrapAdmin();
-app.get('/api/auth/status',(req,res)=>{ const admin=db.prepare("SELECT id FROM users WHERE role='admin' LIMIT 1").get(); const session=getSession(req); res.json({setupRequired:!admin,authenticated:!!session,username:session?.username||null}); });
-app.post('/api/auth/setup',(req,res)=>{ if(db.prepare("SELECT id FROM users WHERE role='admin' LIMIT 1").get()) return res.status(409).json({error:'管理员已经创建，请直接登录。'}); const username=String(req.body?.username||'').trim().slice(0,40), password=String(req.body?.password||''); if(!/^[a-zA-Z0-9_.-]{3,40}$/.test(username)) return res.status(400).json({error:'用户名需为 3-40 位字母、数字或 . _ -'}); if(password.length<8) return res.status(400).json({error:'密码至少 8 位。'}); const h=hashPassword(password); db.prepare('INSERT INTO users(username,password,role) VALUES(?,?,?)').run(username,h.salt+':'+h.hash,'admin'); const token=signToken({username,exp:Date.now()+7*86400000}); res.setHeader('Set-Cookie',`${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800${process.env.NODE_ENV==='production'?'; Secure':''}`); res.json({ok:true,username}); });
-app.post('/api/auth/login',(req,res)=>{ const username=String(req.body?.username||'').trim(), password=String(req.body?.password||''); const row=db.prepare("SELECT * FROM users WHERE username=? AND role='admin'").get(username); if(!row) return res.status(401).json({error:'用户名或密码错误。'}); const [salt,hash]=String(row.password).split(':'); const valid=hash?checkPassword(password,salt,hash):row.password===password; if(!valid) return res.status(401).json({error:'用户名或密码错误。'}); const token=signToken({username,exp:Date.now()+7*86400000}); res.setHeader('Set-Cookie',`${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800${process.env.NODE_ENV==='production'?'; Secure':''}`); res.json({ok:true,username}); });
-app.post('/api/auth/logout',(req,res)=>{res.setHeader('Set-Cookie',`${COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${process.env.NODE_ENV==='production'?'; Secure':''}`);res.json({ok:true});});
+app.get('/api/auth/status',(req,res)=>{ const admin=db.prepare("SELECT id FROM users WHERE LOWER(COALESCE(role,'')) IN ('admin','superadmin','super_admin','owner') LIMIT 1").get(); const session=getSession(req); res.setHeader('Cache-Control','no-store'); res.json({setupRequired:!admin,authenticated:!!session,username:session?.username||null}); });
+app.post('/api/auth/setup',(req,res)=>{ if(db.prepare("SELECT id FROM users WHERE LOWER(COALESCE(role,'')) IN ('admin','superadmin','super_admin','owner') LIMIT 1").get()) return res.status(409).json({error:'管理员已经创建，请直接登录。'}); const username=String(req.body?.username||'').trim().slice(0,40), password=String(req.body?.password||''); if(!/^[a-zA-Z0-9_.-]{3,40}$/.test(username)) return res.status(400).json({error:'用户名需为 3-40 位字母、数字或 . _ -'}); if(password.length<8) return res.status(400).json({error:'密码至少 8 位。'}); const h=hashPassword(password); db.prepare('INSERT INTO users(username,password,role) VALUES(?,?,?)').run(username,h.salt+':'+h.hash,'admin'); const token=signToken({username,exp:Date.now()+7*86400000}); setAuthCookie(res, token); res.json({ok:true,username}); });
+app.post('/api/auth/login',(req,res)=>{ const username=String(req.body?.username||'').trim(), password=String(req.body?.password||''); const row=db.prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE AND LOWER(COALESCE(role,'')) IN ('admin','superadmin','super_admin','owner') LIMIT 1").get(username); if(!row) return res.status(401).json({error:'用户名或密码错误。'}); const stored = String(row.password || ''); const parts = stored.split(':'); const isScrypt = parts.length === 2 && /^[a-f0-9]{32,}$/i.test(parts[0]) && /^[a-f0-9]{128}$/i.test(parts[1]); let valid = false; try { valid = isScrypt ? checkPassword(password, parts[0], parts[1]) : stored === password; } catch { valid = false; } if(!valid) return res.status(401).json({error:'用户名或密码错误。'}); if(!isScrypt) { const upgraded = hashPassword(password); db.prepare('UPDATE users SET password=? WHERE id=?').run(upgraded.salt+':'+upgraded.hash, row.id); } const token=signToken({username:row.username,exp:Date.now()+7*86400000}); setAuthCookie(res, token); res.json({ok:true,username:row.username}); });
+app.post('/api/auth/logout',(req,res)=>{setAuthCookie(res, '', 0);res.json({ok:true});});
 app.use('/api',(req,res,next)=>{if(['/auth/status','/auth/setup','/auth/login','/auth/logout'].includes(req.path))return next();if(!getSession(req))return res.status(401).json({error:'登录已失效，请重新登录。',code:'AUTH_REQUIRED'});next();});
+
+// 数据库备份：使用 SQLite 原生 backup API，避免直接复制运行中的 WAL 数据库造成备份不完整。
+const BACKUP_DIR = path.resolve(process.env.BACKUP_DIR || path.join(path.dirname(DB_PATH), 'backups'));
+const BACKUP_RETENTION_DAYS = Math.max(1, Number.parseInt(process.env.BACKUP_RETENTION_DAYS || '14', 10) || 14);
+let backupInProgress = false;
+async function createDatabaseBackup() {
+  if (backupInProgress) throw new Error('已有数据库备份正在执行，请稍后再试。');
+  backupInProgress = true;
+  try {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `ai-lead-master-${stamp}.sqlite`;
+    const destination = path.join(BACKUP_DIR, filename);
+    await db.backup(destination);
+    const cutoff = Date.now() - BACKUP_RETENTION_DAYS * 86400000;
+    for (const name of fs.readdirSync(BACKUP_DIR)) {
+      if (!/^ai-lead-master-.*\.sqlite$/.test(name)) continue;
+      const file = path.join(BACKUP_DIR, name);
+      try { if (fs.statSync(file).mtimeMs < cutoff) fs.unlinkSync(file); } catch {}
+    }
+    console.log(`[DB] 备份完成：${destination}`);
+    return { filename, path: destination, created_at: new Date().toISOString() };
+  } finally { backupInProgress = false; }
+}
+app.post('/api/admin/backup', async (req, res) => {
+  try { const result = await createDatabaseBackup(); res.json({ ok: true, backup: result.filename, created_at: result.created_at }); }
+  catch (err) { console.error('[DB backup]', err); res.status(500).json({ ok: false, error: `数据库备份失败：${err.message}` }); }
+});
+app.get('/api/admin/backups', (req, res) => {
+  try {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const backups = fs.readdirSync(BACKUP_DIR).filter(n => /^ai-lead-master-.*\.sqlite$/.test(n)).map(name => {
+      const st = fs.statSync(path.join(BACKUP_DIR, name));
+      return { filename: name, size_bytes: st.size, created_at: st.mtime.toISOString() };
+    }).sort((a,b) => b.created_at.localeCompare(a.created_at));
+    res.json({ ok: true, backups });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
+});
+app.get('/api/admin/backups/:filename', (req, res) => {
+  const filename = String(req.params.filename || '');
+  if (!/^ai-lead-master-[0-9TZ-]+\.sqlite$/.test(filename)) return res.status(400).json({ error: '备份文件名无效。' });
+  const file = path.join(BACKUP_DIR, filename);
+  if (!fs.existsSync(file)) return res.status(404).json({ error: '备份文件不存在。' });
+  res.download(file, filename);
+});
 
 // Gemini Key：优先使用 Render 环境变量；也支持后台加密保存到 SQLite。
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
@@ -535,7 +622,7 @@ app.get('/', (req, res) => {
   </style>
 </head>
 <body>
-  <div id="authGate" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;background:linear-gradient(135deg,#20265b,#5147a8 55%,#1686a4)"><div style="width:min(430px,100%);background:#fff;border-radius:24px;padding:30px;box-shadow:0 25px 80px #11182766"><div style="font-size:12px;font-weight:900;letter-spacing:2px;color:#655cf3;margin-bottom:10px">AI LEAD MASTER</div><h2 id="authTitle" style="margin-bottom:8px">管理员登录</h2><p id="authHint" style="color:#71809b;font-size:13px;margin:0 0 20px">请登录后进入管理后台</p><form id="authForm" style="display:grid;gap:12px"><input id="authUsername" required minlength="3" placeholder="管理员用户名" style="padding:13px;border:1px solid #dce2f0;border-radius:12px;font-size:15px"><input id="authPassword" required type="password" placeholder="密码（至少 10 位）" style="padding:13px;border:1px solid #dce2f0;border-radius:12px;font-size:15px"><button id="authSubmit" class="primary" type="submit" style="padding:14px">登录</button></form><p id="authError" style="color:#dc3545;font-size:13px;min-height:20px;margin:12px 0 0"></p></div></div>
+  <div id="authGate" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;background:linear-gradient(135deg,#20265b,#5147a8 55%,#1686a4)"><div style="width:min(430px,100%);background:#fff;border-radius:24px;padding:30px;box-shadow:0 25px 80px #11182766"><div style="font-size:12px;font-weight:900;letter-spacing:2px;color:#655cf3;margin-bottom:10px">AI LEAD MASTER</div><h2 id="authTitle" style="margin-bottom:8px">管理员登录</h2><p id="authHint" style="color:#71809b;font-size:13px;margin:0 0 20px">请登录后进入管理后台</p><form id="authForm" style="display:grid;gap:12px"><input id="authUsername" required minlength="3" placeholder="管理员用户名" style="padding:13px;border:1px solid #dce2f0;border-radius:12px;font-size:15px"><input id="authPassword" required type="password" placeholder="密码（至少 8 位）" style="padding:13px;border:1px solid #dce2f0;border-radius:12px;font-size:15px"><button id="authSubmit" class="primary" type="submit" style="padding:14px">登录</button></form><p id="authError" style="color:#dc3545;font-size:13px;min-height:20px;margin:12px 0 0"></p></div></div>
   <div class="container" id="mainApp" style="display:none">
     <div class="header-bar" id="sec-dashboard">
       <div class="header-top">
@@ -553,6 +640,7 @@ app.get('/', (req, res) => {
         <button class="nav-btn" onclick="scrollToSec('sec-social-acc')" data-i18n="nav_social">👤 社媒配置</button>
         <button class="nav-btn" onclick="scrollToSec('sec-search-task')" data-i18n="nav_tasks">🌐 搜客任务</button>
         <button class="nav-btn" onclick="scrollToSec('sec-appointments')" data-i18n="nav_appts">📅 预约列表</button>
+        <button class="nav-btn" onclick="scrollToSec('sec-db-backups')">💾 数据备份</button>
       </div>
     </div>
 
@@ -707,6 +795,18 @@ app.get('/', (req, res) => {
       <div class="table-responsive">
         <table><thead><tr><th data-i18n="th_appt_no">单号</th><th data-i18n="th_staff">技师</th><th data-i18n="th_phone">客户手机号</th><th data-i18n="th_appt_time">时间</th><th data-i18n="th_status">状态</th><th data-i18n="th_action">操作</th></tr></thead><tbody id="appointmentList"></tbody></table>
       </div>
+    </div>
+
+    <div class="card" id="sec-db-backups" style="border:1px solid #10b981;">
+      <h3>💾 数据库备份与恢复</h3>
+      <p style="font-size:13px;color:#64748b;">系统默认每 24 小时自动备份一次。此处可立即创建备份并下载。备份文件保存在 Render 持久化磁盘的 backups 目录中。</p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;">
+        <button class="success" type="button" id="createBackupBtn" onclick="createManualBackup()">立即备份数据库</button>
+        <button class="secondary" type="button" onclick="loadBackupList()">刷新备份列表</button>
+      </div>
+      <p id="backupStatus" style="font-size:13px;color:#64748b;"></p>
+      <div class="table-responsive"><table><thead><tr><th>备份文件</th><th>大小</th><th>创建时间</th><th>下载</th></tr></thead><tbody id="backupList"><tr><td colspan="4">点击刷新备份列表</td></tr></tbody></table></div>
+      <p style="font-size:12px;color:#b45309;">注意：备份和数据库必须位于 Render Persistent Disk 才能跨部署保留。系统不会自动清空客户线索、预约或管理员资料。</p>
     </div>
   </div>
 
@@ -865,10 +965,10 @@ app.get('/', (req, res) => {
       return data;
     }
 
-    window.addEventListener("DOMContentLoaded", async () => { applyLanguage(); const st=await fetch('/api/auth/status').then(r=>r.json()).catch(()=>({setupRequired:true})); if(st.authenticated){enterAdmin(st.username);return;} document.getElementById('authTitle').textContent=st.setupRequired?'创建管理员账号':'管理员登录';document.getElementById('authHint').textContent=st.setupRequired?'首次使用，请创建管理员账号和密码，密码至少 10 位。':'请登录后进入管理后台';document.getElementById('authSubmit').textContent=st.setupRequired?'创建账号并进入后台':'登录';document.getElementById('authForm').dataset.mode=st.setupRequired?'setup':'login'; });
+    window.addEventListener("DOMContentLoaded", async () => { applyLanguage(); const title=document.getElementById('authTitle'),hint=document.getElementById('authHint'),submit=document.getElementById('authSubmit'),form=document.getElementById('authForm'); try { const response=await fetch('/api/auth/status',{cache:'no-store',credentials:'same-origin'}); if(!response.ok) throw new Error('HTTP '+response.status); const st=await response.json(); if(st.authenticated){enterAdmin(st.username);return;} title.textContent=st.setupRequired?'创建管理员账号':'管理员登录'; hint.textContent=st.setupRequired?'首次使用，请创建管理员账号和密码，密码至少 8 位。':'请登录后进入管理后台'; submit.textContent=st.setupRequired?'创建账号并进入后台':'登录'; form.dataset.mode=st.setupRequired?'setup':'login'; } catch(err) { title.textContent='无法连接登录服务'; hint.textContent='登录状态检查失败，请刷新页面；如果持续出现，请检查 Render 服务日志。'; submit.disabled=true; document.getElementById('authError').textContent='认证服务异常：'+err.message; } });
     function enterAdmin(username){document.getElementById('authGate').style.display='none';document.getElementById('mainApp').style.display='block';document.getElementById('currentUserDisplay').textContent='👤 '+username;loadAllData();checkGeminiStatus();}
-    document.getElementById('authForm').addEventListener('submit',async e=>{e.preventDefault();const err=document.getElementById('authError');err.textContent='正在验证…';const mode=e.currentTarget.dataset.mode||'login';try{const r=await fetch('/api/auth/'+mode,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:document.getElementById('authUsername').value.trim(),password:document.getElementById('authPassword').value})});const d=await r.json();if(!r.ok)throw new Error(d.error||'登录失败');enterAdmin(d.username);}catch(x){err.textContent=x.message;}});
-    async function logoutAdmin(){await fetch('/api/auth/logout',{method:'POST'});location.reload();}
+    document.getElementById('authForm').addEventListener('submit',async e=>{e.preventDefault();const err=document.getElementById('authError');err.textContent='正在验证…';const mode=e.currentTarget.dataset.mode||'login';try{const r=await fetch('/api/auth/'+mode,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:document.getElementById('authUsername').value.trim(),password:document.getElementById('authPassword').value})});const d=await r.json();if(!r.ok)throw new Error(d.error||'登录失败');enterAdmin(d.username);}catch(x){err.textContent=x.message;}});
+    async function logoutAdmin(){try{await fetch('/api/auth/logout',{method:'POST',credentials:'same-origin'});}finally{location.reload();}}
 
 
     async function loadAllData() {
@@ -879,6 +979,7 @@ app.get('/', (req, res) => {
       await loadSearchTasks();
       await loadChatLogs();
       await loadStoredLeads();
+      await loadBackupList();
       applyLanguage();
     }
 
@@ -1164,6 +1265,35 @@ app.get('/', (req, res) => {
       if (!confirm("Confirm to cancel?")) return;
       try { await api("/api/appointments/" + no, { method: "DELETE" }); await loadAppointments(); await loadStats(); } catch (err) { alert(err.message); }
     }
+
+    async function createManualBackup() {
+      const btn = document.getElementById('createBackupBtn');
+      const status = document.getElementById('backupStatus');
+      btn.disabled = true; status.textContent = '正在创建数据库备份…';
+      try {
+        const result = await api('/api/admin/backup', { method: 'POST', body: '{}' });
+        status.textContent = '备份成功：' + result.backup;
+        await loadBackupList();
+      } catch (err) { status.textContent = '备份失败：' + err.message; }
+      finally { btn.disabled = false; }
+    }
+
+    async function loadBackupList() {
+      const tbody = document.getElementById('backupList');
+      if (!tbody) return;
+      try {
+        const result = await api('/api/admin/backups');
+        tbody.innerHTML = '';
+        if (!result.backups.length) { tbody.innerHTML = '<tr><td colspan="4">暂无备份，请点击“立即备份数据库”。</td></tr>'; return; }
+        result.backups.forEach(item => {
+          const tr = document.createElement('tr');
+          const add = value => { const td = document.createElement('td'); td.textContent = value; tr.appendChild(td); };
+          add(item.filename); add((item.size_bytes / 1024 / 1024).toFixed(2) + ' MB'); add(new Date(item.created_at).toLocaleString());
+          const td = document.createElement('td'); const a = document.createElement('a');
+          a.href = '/api/admin/backups/' + encodeURIComponent(item.filename); a.textContent = '下载备份'; a.setAttribute('download', item.filename); td.appendChild(a); tr.appendChild(td); tbody.appendChild(tr);
+        });
+      } catch (err) { tbody.innerHTML = '<tr><td colspan="4">读取备份失败：' + err.message + '</td></tr>'; }
+    }
   </script>
 </body>
 </html>`);
@@ -1171,4 +1301,11 @@ app.get('/', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
+  const backupHours = Math.max(0, Number.parseFloat(process.env.AUTO_BACKUP_INTERVAL_HOURS || '24') || 0);
+  if (backupHours > 0) {
+    // 启动后先做一次备份，之后按配置周期执行；需要 Render Persistent Disk 才能跨部署保留。
+    setTimeout(() => createDatabaseBackup().catch(err => console.error('[DB backup]', err.message)), 15000).unref?.();
+    const timer = setInterval(() => createDatabaseBackup().catch(err => console.error('[DB backup]', err.message)), backupHours * 3600000);
+    timer.unref?.();
+  }
 });
