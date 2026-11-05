@@ -1,9 +1,8 @@
-
 {
-  "name": "ai-lead-master",
-  "version": "2.0.0",
+  "name": "ai-lead-master-crm",
+  "version": "1.2.2",
   "private": true,
-  "description": "AI Lead Master Global Lead Generation CRM",
+  "description": "AI Lead Master CRM with admin auth fixes, SQLite backups and Gemini assistant",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
