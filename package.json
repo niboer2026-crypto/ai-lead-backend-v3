@@ -1,11 +1,13 @@
 {
   "name": "ai-lead-master",
   "version": "1.0.0",
+  "description": "AI Lead Master CRM",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
+    "@google/genai": "^0.1.1",
     "better-sqlite3": "^11.0.0",
     "express": "^4.19.2"
   }
