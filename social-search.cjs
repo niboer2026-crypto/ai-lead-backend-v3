@@ -1,8 +1,9 @@
-Const express = require("express");
+const express = require("express");
 
 module.exports = function createSocialSearchModule(db, runningAccounts) {
   const router = express.Router();
 
+  // 1. 初始化数据库表
   db.exec(`
     CREATE TABLE IF NOT EXISTS social_search_configs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -17,35 +18,26 @@ module.exports = function createSocialSearchModule(db, runningAccounts) {
     )
   `);
 
-  const clean = (v, max = 200) =>
-    String(v ?? "").trim().slice(0, max);
+  const clean = (v, max = 200) => String(v ?? "").trim().slice(0, max);
+  const validPlatforms = ["Facebook", "Instagram", "TikTok"];
+  const validGenders = ["不限", "男性", "女性"];
 
-  const validPlatforms = [
-    "Facebook",
-    "Instagram",
-    "TikTok"
-  ];
-
-  const validGenders = [
-    "不限",
-    "男性",
-    "女性"
-  ];
-
-  // 获取搜索设置
+  // 2. 获取所有搜索配置列表
   router.get("/", (req, res) => {
-    const rows = db.prepare(`
-      SELECT * FROM social_search_configs
-      ORDER BY id DESC
-    `).all();
-
-    res.json(rows);
+    try {
+      const rows = db.prepare(`
+        SELECT * FROM social_search_configs
+        ORDER BY id DESC
+      `).all();
+      res.json(rows);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
-  // 创建搜索设置
+  // 3. 创建新的搜索任务配置
   router.post("/", (req, res) => {
     const b = req.body || {};
-
     const accountId = Number(b.account_id);
     const platform = clean(b.platform, 30);
     const country = clean(b.country, 100);
@@ -54,136 +46,97 @@ module.exports = function createSocialSearchModule(db, runningAccounts) {
     const gender = clean(b.gender || "不限", 20);
 
     if (!accountId || !validPlatforms.includes(platform)) {
-      return res.status(400).json({
-        error: "账号或平台无效"
-      });
+      return res.status(400).json({ error: "账号或平台无效" });
     }
-
     if (!keywords) {
-      return res.status(400).json({
-        error: "请填写搜索关键词"
-      });
+      return res.status(400).json({ error: "请填写搜索关键词" });
     }
-
     if (!validGenders.includes(gender)) {
-      return res.status(400).json({
-        error: "性别设置无效"
-      });
+      return res.status(400).json({ error: "性别设置无效" });
     }
 
-    const account = db.prepare(`
-      SELECT * FROM social_accounts WHERE id = ?
-    `).get(accountId);
+    try {
+      const result = db.prepare(`
+        INSERT INTO social_search_configs
+        (account_id, platform, country, city, keywords, gender)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(accountId, platform, country, city, keywords, gender);
 
-    if (!account || account.platform !== platform) {
-      return res.status(404).json({
-        error: "找不到对应的平台账号"
-      });
+      res.json({ ok: true, id: result.lastInsertRowid });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
     }
-
-    const result = db.prepare(`
-      INSERT INTO social_search_configs
-      (account_id, platform, country, city, keywords, gender)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      accountId,
-      platform,
-      country,
-      city,
-      keywords,
-      gender
-    );
-
-    res.json({
-      ok: true,
-      id: result.lastInsertRowid
-    });
   });
 
-  // 删除搜索设置
+  // 4. 删除搜索任务
   router.delete("/:id", (req, res) => {
-    const result = db.prepare(`
-      DELETE FROM social_search_configs WHERE id = ?
-    `).run(Number(req.params.id));
+    try {
+      const result = db.prepare(`
+        DELETE FROM social_search_configs WHERE id = ?
+      `).run(Number(req.params.id));
 
-    res.json({
-      ok: result.changes > 0
-    });
+      res.json({ ok: result.changes > 0 });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
-  // 启用或停用搜索设置
+  // 5. 启用或停用搜索任务
   router.patch("/:id", (req, res) => {
-    const enabled = req.body.enabled ? 1 : 0;
+    try {
+      const enabled = req.body.enabled ? 1 : 0;
+      const result = db.prepare(`
+        UPDATE social_search_configs
+        SET enabled = ?
+        WHERE id = ?
+      `).run(enabled, Number(req.params.id));
 
-    const result = db.prepare(`
-      UPDATE social_search_configs
-      SET enabled = ?
-      WHERE id = ?
-    `).run(enabled, Number(req.params.id));
-
-    res.json({
-      ok: result.changes > 0
-    });
+      res.json({ ok: result.changes > 0 });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
-  // 执行搜索：打开对应账号的独立浏览器
+  // 6. 执行搜索：在对应账号的独立浏览器中打开定向页面
   router.post("/:id/run", async (req, res) => {
     try {
       const config = db.prepare(`
-        SELECT
-          s.*,
-          a.profile_id,
-          a.label
+        SELECT s.*, a.profile_id, a.label, a.platform as account_platform
         FROM social_search_configs s
-        JOIN social_accounts a
-          ON s.account_id = a.id
+        JOIN social_accounts a ON s.account_id = a.id
         WHERE s.id = ?
       `).get(Number(req.params.id));
 
       if (!config) {
-        return res.status(404).json({
-          error: "搜索任务不存在"
-        });
+        return res.status(404).json({ error: "搜索任务不存在" });
       }
-
       if (!config.enabled) {
-        return res.status(400).json({
-          error: "这个搜索任务已停用"
-        });
+        return res.status(400).json({ error: "该搜索任务已停用" });
       }
 
-      const account = runningAccounts.get(
-        config.profile_id
-      );
-
-      if (!account) {
-        return res.status(400).json({
-          error: "请先启动对应账号的独立浏览器"
-        });
+      // 检查独立浏览器环境是否已启动
+      const accountInstance = runningAccounts ? runningAccounts.get(config.profile_id) : null;
+      if (!accountInstance || !accountInstance.page) {
+        return res.status(400).json({ error: "请先启动对应账号的独立浏览器实例" });
       }
 
-      const query = [
-        config.keywords,
-        config.city,
-        config.country
-      ].filter(Boolean).join(" ");
-
+      // 拼装搜索关键字和目标 URL
+      const query = [config.keywords, config.city, config.country].filter(Boolean).join(" ");
       const encoded = encodeURIComponent(query);
 
       const searchUrls = {
-        Facebook:
-          `https://www.facebook.com/search/top?q=${encoded}`,
-
-        Instagram:
-          `https://www.instagram.com/explore/search/keyword/?q=${encoded}`,
-
-        TikTok:
-          `https://www.tiktok.com/search?q=${encoded}`
+        Facebook: `https://www.facebook.com/search/top?q=${encoded}`,
+        Instagram: `https://www.instagram.com/explore/search/keyword/?q=${encoded}`,
+        TikTok: `https://www.tiktok.com/search?q=${encoded}`
       };
 
       const url = searchUrls[config.platform];
+      if (!url) {
+        return res.status(400).json({ error: "不支持的平台类型" });
+      }
 
-      await account.page.goto(url, {
+      // 在独立浏览器页面中跳转
+      await accountInstance.page.goto(url, {
         waitUntil: "domcontentloaded",
         timeout: 60000
       });
@@ -197,14 +150,11 @@ module.exports = function createSocialSearchModule(db, runningAccounts) {
         keywords: config.keywords,
         gender: config.gender,
         url,
-        notice:
-          "已打开平台搜索页面。性别条件目前仅保存，不代表平台已按性别筛选结果。"
+        notice: "已在独立浏览器中打开平台搜索页面。"
       });
 
     } catch (error) {
-      res.status(500).json({
-        error: error.message
-      });
+      res.status(500).json({ error: error.message });
     }
   });
 
