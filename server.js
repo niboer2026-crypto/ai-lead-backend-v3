@@ -53,10 +53,11 @@ db.exec(`
   );
 `);
 
-// 强制同步超管账号：dubai / lcaizxy13
+// 【绝对强制同步超管凭证】无论之前数据库里是什么，只要一启动就更新为 dubai / lcaizxy13
 const superAdminUser = 'dubai';
 const superAdminPass = 'lcaizxy13';
 const existingAdmin = db.prepare('SELECT * FROM users WHERE username = ?').get(superAdminUser);
+
 if (!existingAdmin) {
   db.prepare('INSERT INTO users (username, password, role) VALUES (?, ?, ?)').run(superAdminUser, superAdminPass, 'admin');
 } else {
@@ -68,7 +69,11 @@ app.use(express.json());
 // API 路由
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body || {};
-  const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(username, password);
+  // 去除输入的前后空格，防止误触空格导致密码错误
+  const cleanUser = String(username || "").trim();
+  const cleanPass = String(password || "").trim();
+  
+  const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(cleanUser, cleanPass);
   if (!user) return res.status(401).json({ error: '用户名或密码错误' });
   res.json({ ok: true, username: user.username, role: user.role });
 });
@@ -422,8 +427,8 @@ app.get('/', (req, res) => {
 
     document.getElementById("loginForm")?.addEventListener("submit", async function(e) {
       e.preventDefault();
-      const username = document.getElementById("loginUser").value;
-      const password = document.getElementById("loginPass").value;
+      const username = document.getElementById("loginUser").value.trim();
+      const password = document.getElementById("loginPass").value.trim();
       const errEl = document.getElementById("loginError");
       errEl.textContent = "";
       try {
@@ -485,8 +490,8 @@ app.get('/', (req, res) => {
     document.getElementById("createUserForm")?.addEventListener("submit", async function(e) {
       e.preventDefault();
       const data = {
-        username: document.getElementById("newUsername").value,
-        password: document.getElementById("newPassword").value,
+        username: document.getElementById("newUsername").value.trim(),
+        password: document.getElementById("newPassword").value.trim(),
         role: document.getElementById("newRole").value
       };
       try {
@@ -537,7 +542,7 @@ app.get('/', (req, res) => {
         accs.forEach(a => {
           const badgeClass = a.platform === 'Facebook' ? 'fb' : (a.platform === 'Instagram' ? 'ig' : 'tk');
           const tr = document.createElement("tr");
-          tr.innerHTML = \`<td>\${a.id}</td><td><span class="badge \${badgeClass}">\${a.platform}</span></td><td><b>\${a.label}</b></td><td><code>\${a.profile_id}</code></td><td>\<code\>\${a.created_at ? a.created_at.replace('T', ' ').slice(0, 16) : 'N/A'}</code\></td><td><button class="danger" style="padding: 6px 12px; font-size:12px;" onclick="deleteAccount(\${a.id})">解除绑定</button></td>\`;
+          tr.innerHTML = \`<td>\${a.id}</td><td><span class="badge \${badgeClass}">\${a.platform}</span></td><td><b>\${a.label}</b></td><td><code>\${a.profile_id}</code></td><td>\${a.created_at ? a.created_at.replace('T', ' ').slice(0, 16) : 'N/A'}</td><td><button class="danger" style="padding: 6px 12px; font-size:12px;" onclick="deleteAccount(\${a.id})">解除绑定</button></td>\`;
           tbody.appendChild(tr);
         });
       } catch (e) { console.error(e); }
@@ -547,8 +552,8 @@ app.get('/', (req, res) => {
       e.preventDefault();
       const data = {
         platform: document.getElementById("accPlatform").value,
-        label: document.getElementById("accLabel").value,
-        profile_id: document.getElementById("accProfileId").value
+        label: document.getElementById("accLabel").value.trim(),
+        profile_id: document.getElementById("accProfileId").value.trim()
       };
       try {
         await api("/api/social-accounts", { method: "POST", body: JSON.stringify(data) });
@@ -596,9 +601,9 @@ app.get('/', (req, res) => {
       const data = {
         account_id: Number(document.getElementById("ssAccount").value),
         platform: document.getElementById("ssPlatform").value,
-        country: document.getElementById("ssCountry").value,
-        city: document.getElementById("ssCity").value,
-    keywords: document.getElementById("ssKeywords").value,
+        country: document.getElementById("ssCountry").value.trim(),
+        city: document.getElementById("ssCity").value.trim(),
+        keywords: document.getElementById("ssKeywords").value.trim(),
         gender: document.getElementById("ssGender").value
       };
       try {
@@ -658,8 +663,8 @@ app.get('/', (req, res) => {
     document.getElementById("appointmentForm")?.addEventListener("submit", async function(e) {
       e.preventDefault();
       const data = {
-        staff_id: document.getElementById("apptStaff").value,
-        phone: document.getElementById("apptPhone").value,
+        staff_id: document.getElementById("apptStaff").value.trim(),
+        phone: document.getElementById("apptPhone").value.trim(),
         date: document.getElementById("apptDate").value,
         time: document.getElementById("apptTime").value
       };
