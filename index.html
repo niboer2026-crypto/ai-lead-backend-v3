@@ -21,22 +21,30 @@
 </head>
 <body>
   <div class="container">
-    <h2>🚀 AI Lead Master & 美业 CRM 控制台</h2>
+    <h2>🚀 AI Lead Master & 美业 CRM 控制台（双引擎版）</h2>
 
     <!-- AI 配置与密钥设置 -->
     <div class="card">
-      <h3>🔐 Gemini API Key 设置</h3>
-      <div style="display:flex;gap:10px">
-        <input id="apiKeyInput" type="password" placeholder="粘贴 Gemini API Key (支持多个 Key 用逗号分隔)">
-        <button onclick="saveApiKey()" style="white-space:nowrap">保存 Key</button>
-        <button class="success" onclick="testKey()" style="white-space:nowrap">测试连接</button>
+      <h3>🔐 AI 引擎状态与设置</h3>
+      <p id="aiStatus" style="font-size:14px;font-weight:bold;color:#4f46e5;margin-bottom:12px">状态：检查中...</p>
+      
+      <div style="margin-bottom:12px">
+        <label style="font-size:13px;font-weight:600">Gemini API Key (支持多个逗号分隔)</label>
+        <div style="display:flex;gap:10px">
+          <input id="apiKeyInput" type="password" placeholder="粘贴 Gemini API Key">
+          <button onclick="saveApiKey()" style="white-space:nowrap">保存 Key</button>
+        </div>
       </div>
-      <p id="keyStatus" style="font-size:13px;color:#64748b;margin-top:8px">状态：检查中...</p>
+
+      <div style="display:flex;gap:10px;margin-top:15px">
+        <button class="success" onclick="testKey()" style="white-space:nowrap">测试双引擎连接</button>
+      </div>
+      <p style="font-size:12px;color:#64748b;margin-top:8px">提示：当 Gemini 触发 429 额度超限时，系统会自动切换至豆包（Doubao-seed-2-1-turbo-260628）兜底回复。</p>
     </div>
 
     <!-- AI 助理对话测试 -->
     <div class="card">
-      <h3>🤖 AI 美业客服助理实时测试 (gemini-3.8-flash)</h3>
+      <h3>🤖 AI 美业客服助理实时测试</h3>
       <div class="chat-box" id="chatContainer">
         <div class="msg ai">👋 您好！我是 Beauty Corner 专属美业助理，请问有什么可以帮您的？</div>
       </div>
@@ -53,9 +61,9 @@
       try {
         const res = await fetch('/api/ai/status');
         const data = await res.json();
-        document.getElementById('keyStatus').textContent = data.configured ? '状态：AI 引擎已就绪 (Online)' : '状态：未配置 API Key';
+        document.getElementById('aiStatus').textContent = `当前引擎模式：${data.model} | 状态：${data.configured ? '已就绪 (Online)' : '未配置'}`;
       } catch (e) {
-        document.getElementById('keyStatus').textContent = '状态：连接后端服务异常';
+        document.getElementById('aiStatus').textContent = '状态：连接后端服务异常';
       }
     }
 
@@ -82,7 +90,7 @@
       } catch (err) {
         alert('请求出错: ' + err.message);
       } finally {
-        btn.textContent = '测试连接';
+        btn.textContent = '测试双引擎连接';
       }
     }
 
